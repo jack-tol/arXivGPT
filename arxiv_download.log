@@ -1,0 +1,23 @@
+2024-04-30 21:49:09,922 - INFO - Getting papers...
+2024-04-30 21:49:20,743 - INFO - Papers retrieved.
+2024-04-30 21:49:20,801 - INFO - 1000 Processing Attempts Made Successfully.
+2024-04-30 21:49:25,511 - INFO - Metadata For The Specified Period, 2024-04-25 - 2024-04-25 Downloaded.
+2024-04-30 21:50:15,849 - INFO - Getting papers...
+2024-04-30 21:50:26,276 - INFO - Papers retrieved.
+2024-04-30 21:50:26,335 - INFO - 1000 Processing Attempts Made Successfully.
+2024-04-30 21:50:32,200 - INFO - Metadata For The Specified Period, 2024-04-25 - 2024-04-25 Downloaded.
+2024-04-30 21:50:41,296 - INFO - Load pretrained SentenceTransformer: sentence-transformers/all-mpnet-base-v2
+2024-04-30 21:50:44,518 - INFO - Use pytorch device_name: mps
+2024-04-30 21:51:34,226 - INFO - Getting papers...
+2024-04-30 21:51:42,895 - INFO - Papers retrieved.
+2024-04-30 21:51:42,963 - INFO - 1000 Processing Attempts Made Successfully.
+2024-04-30 21:51:44,613 - WARNING - HTTPError 503: Server busy. Retrying after 5 seconds.
+2024-04-30 21:51:54,452 - INFO - Metadata For The Specified Period, 2024-04-25 - 2024-04-25 Downloaded.
+2024-04-30 21:51:54,663 - INFO - Load pretrained SentenceTransformer: sentence-transformers/all-mpnet-base-v2
+2024-04-30 21:51:58,186 - INFO - Use pytorch device_name: mps
+2024-04-30 21:57:07,125 - INFO - Getting papers...
+2024-04-30 21:57:16,743 - INFO - Papers retrieved.
+2024-04-30 21:57:16,807 - INFO - 1000 Processing Attempts Made Successfully.
+2024-04-30 21:57:23,315 - INFO - Metadata For The Specified Period, 2024-04-24 - 2024-04-24 Downloaded.
+2024-04-30 21:57:23,836 - INFO - Load pretrained SentenceTransformer: sentence-transformers/all-mpnet-base-v2
+2024-04-30 21:57:26,736 - INFO - Use pytorch device_name: mps

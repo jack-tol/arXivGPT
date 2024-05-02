@@ -1,0 +1,5 @@
+pandas
+sickle
+langchain
+langchain_pinecone
+sentence-transformers
