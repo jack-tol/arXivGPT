@@ -190,17 +190,17 @@ async def on_ask_about_new_paper(action):
 async def on_exit_session(action):
     global session_active
     session_active = False
-    await cl.Message(content="Session Exited. Take Care.").send()
+    await cl.Message(content="Session Exited. Please Take Care.").send()
     await action.remove()
 
 @cl.on_chat_start
 async def main():
-    global selected_doc_id  # Ensure global usage
-    text_content = """# Welcome to the arXiv Research Paper Learning Supplement
+    global selected_doc_id
+    text_content = """## Welcome to the arXiv Research Paper Learning Supplement
 
 This system is connected to the live stream of papers being uploaded to arXiv daily.
 
-## Instructions
+### Instructions
 
 1. **Enter the Title**: Start by entering the title of the research paper you wish to learn more about.
 2. **Select a Paper**: Choose a paper from the list of retrieved papers.
@@ -213,14 +213,11 @@ This system is connected to the live stream of papers being uploaded to arXiv da
    - Ask a new question about a different paper.
    - Exit the application.
 
+### Get Started
+When You're Ready, Follow the First Step Below.
+
 """
-    elements = [
-        cl.Text(content=text_content, display="inline")
-    ]
-    await cl.Message(
-        content="",
-        elements=elements,
-    ).send()
+    await cl.Message(content=text_content).send()
     
     selected_doc_id = await ask_for_paper()
     if selected_doc_id:
