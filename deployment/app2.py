@@ -1,6 +1,6 @@
 import os
 import asyncio
-from openai import OpenAI
+from openai import AsyncOpenAI
 import arxiv
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
@@ -57,21 +57,54 @@ async def process_user_query(document_id):
     filter = {"document_id": {"$eq": document_id}}
     search_results = chunks_vector_store.similarity_search(query=user_query, k=15, filter=filter)
     context = [doc.page_content for doc in search_results]
+    print(context)
+    print(user_query)
     return context, user_query
 
 async def query_openai_with_context(context, user_query):
     if not context:
         return "No context available to answer the question."
-    client = OpenAI()
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "Use the provided context to answer the provided question."},
-            {"role": "user", "content": f"Context: {context}"},
-            {"role": "user", "content": f"Question: {user_query}"}
-        ]
-    )
-    return response.choices[0].message.content.strip()
+    
+    client = AsyncOpenAI()
+    
+    settings = {
+        "model": "gpt-4o",
+        "temperature": 0.3,
+        "top_p": 1,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+    }
+
+    message_history = [
+        {"role": "system", "content": """
+         Your job is to answer the user's query using only the provided context.
+         Be detailed and long-winded. Format your responses in markdown formatting, making good use of headings,
+         subheadings, ordered and unordered lists, and regular text formatting such as bolding of text and italics.
+         Sometimes the equations retrieved from the context will be formatted improperly in an incompatible format
+         for correct markdown rendering. Therefore, if you ever need to provide equations, make sure they are
+         formatted properly using LaTeX, wrapping the equation in single dollar signs ($) for inline equations
+         or double dollar signs ($$) for bigger, more visual equations. Keep your answer grounded in the facts
+         of the provided context. If the context does not contain the facts needed to answer the user's query, return:
+         "I do not have enough information available to accurately answer the question."
+         """},
+        {"role": "user", "content": f"Context: {context}"},
+        {"role": "user", "content": f"Question: {user_query}"}
+    ]
+
+    msg = cl.Message(content="")
+    await msg.send()
+
+    stream = await client.chat.completions.create(messages=message_history, stream=True, **settings)
+
+    async for part in stream:
+        if token := part.choices[0].delta.content or "":
+            await msg.stream_token(token)
+
+    final_response = msg.content
+    message_history.append({"role": "assistant", "content": final_response})
+    await msg.update()
+
+    return final_response
 
 async def select_document_from_results(search_results):
     if not search_results:
@@ -115,16 +148,14 @@ async def ask_for_query(document_id):
     chunks_exist = await check_chunks_existence(document_id)
     if not chunks_exist:
         await process_and_upload_chunks(document_id)
-        # Add a longer delay to ensure chunks are indexed
-        await asyncio.sleep(5)  # Increase the duration as needed
+        await asyncio.sleep(5)
 
-        # Verify chunks upload
         retries = 5
         for attempt in range(retries):
             chunks_exist = await check_chunks_existence(document_id)
             if chunks_exist:
                 break
-            await asyncio.sleep(2)  # Wait before retrying
+            await asyncio.sleep(2)
             await cl.Message(content=f"Verifying chunks upload: Attempt {attempt + 1}/{retries}").send()
 
         if not chunks_exist:
@@ -139,7 +170,7 @@ async def ask_for_query(document_id):
             await cl.Message(content=response).send()
             await send_query_actions()
             return
-        await asyncio.sleep(2)  # Wait before retrying
+        await asyncio.sleep(2)
         await cl.Message(content=f"Retrying context retrieval: Attempt {attempt + 1}/{retries}").send()
 
     await cl.Message(content="Unable to retrieve context for the document. Please try again.").send()
@@ -196,7 +227,7 @@ async def on_exit_session(action):
 @cl.on_chat_start
 async def main():
     global selected_doc_id
-    text_content = """## Welcome to the arXi    v Research Paper Learning Supplement
+    text_content = """## Welcome to the arXiv Research Paper Learning Supplement
 
 This system is connected to the live stream of papers being uploaded to arXiv daily.
 
@@ -214,8 +245,7 @@ This system is connected to the live stream of papers being uploaded to arXiv da
    - Exit the application.
 
 ### Get Started
-When You're Ready, Follow the First Step Below.
-
+When You're Ready, Follow the First Step Below.\\
 """
     await cl.Message(content=text_content).send()
     
