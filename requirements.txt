@@ -1,5 +1,9 @@
-pandas
-sickle
-langchain
-langchain_pinecone
-sentence-transformers
+arxiv
+asyncio
+langchain-community
+langchain-experimental
+langchain-pinecone
+langchain_openai
+chainlit
+openai
+pinecone

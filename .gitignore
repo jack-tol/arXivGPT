@@ -1,3 +1,6 @@
 
 /deployment/.files
 /deployment/__pycache__
+/app/.chainlit/translations
+/app/__pycache__
+arxiv_download.log
