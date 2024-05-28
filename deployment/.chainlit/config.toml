@@ -42,7 +42,7 @@ latex = true
 
 [UI]
 # Name of the app and chatbot.
-name = "arXiv Assistant"
+name = "arXiv Research Assistant"
 
 # Show the readme while the thread is empty.
 show_readme_as_default = false
