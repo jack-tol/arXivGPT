@@ -128,7 +128,7 @@ async def select_document_from_results(search_results):
                 if 0 <= user_choice < len(search_results):
                     selected_doc_id = search_results[user_choice].metadata['document_id']
                     selected_paper_title = search_results[user_choice].page_content
-                    await cl.Message(content=f"\nYou selected: {selected_paper_title}").send()
+                    await cl.Message(content=f"\n**You selected:** {selected_paper_title}").send()
                     return selected_doc_id
                 else:
                     await cl.Message(content="\nInvalid Selection. Please enter a valid number from the list.").send()
@@ -143,7 +143,7 @@ async def do_chunks_exist_already(document_id):
     return bool(test_query)
 
 async def process_and_upload_chunks(document_id):
-    await cl.Message(content="### Paper Not Found. Downloading, Processing, and Uploading in Progress. Please Wait; This Won't Take Long.").send()
+    await cl.Message(content="#### Paper Not Found. Downloading, Processing, and Uploading in Progress. Please Wait; This Won't Take Long.").send()
     await asyncio.sleep(2)
     paper = next(arxiv.Client().results(arxiv.Search(id_list=[str(document_id)])))
     paper.download_pdf(filename=f"{document_id}.pdf")
