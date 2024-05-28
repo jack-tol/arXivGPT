@@ -1,7 +1,5 @@
-# Standard library imports
 import os
 
-# Third-party library imports for arXiv API, document handling, and embedding
 import arxiv
 import asyncio
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -11,12 +9,12 @@ from langchain_pinecone import PineconeVectorStore
 import chainlit as cl
 from openai import AsyncOpenAI
 
-# Initialize components
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 embedding_model = HuggingFaceEmbeddings()
 metadata_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-metadata")
 chunks_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-project-chunks")
 semantic_chunker = SemanticChunker(embeddings=embedding_model, buffer_size=1, add_start_index=False)
+current_task = None
 
 async def send_query_actions():
     if cl.user_session.get("session_active"):
@@ -116,7 +114,7 @@ async def select_document_from_results(search_results):
 
     message_content = "### List of Retrieved Papers | Please Select the Number Corresponding to Your Desired Paper:\n"
     for i, doc in enumerate(search_results, start=1):
-        page_content = doc.page_content[:100]  # Truncate to first 100 characters for brevity
+        page_content = doc.page_content[:100]
         document_id = doc.metadata['document_id']
         message_content += f"{i}: {page_content}\n"
 
@@ -145,7 +143,7 @@ async def do_chunks_exist_already(document_id):
     return bool(test_query)
 
 async def process_and_upload_chunks(document_id):
-    await cl.Message(content="Paper Not Found. Downloading, Processing, and Uploading. Please Wait.").send()
+    await cl.Message(content="### Paper Not Found. Downloading, Processing, and Uploading in Progress. Please Wait; This Won't Take Long.").send()
     await asyncio.sleep(2)
     paper = next(arxiv.Client().results(arxiv.Search(id_list=[str(document_id)])))
     paper.download_pdf(filename=f"{document_id}.pdf")
@@ -169,11 +167,10 @@ async def process_user_query(document_id):
         search_results = chunks_vector_store.similarity_search(query=user_query, k=15, filter=filter)
         for doc in search_results:
             context.append(doc.page_content)
+        print(context)
+        print(user_query)
         return context, user_query
     return None, None
-
-# Global variable to store the current task
-current_task = None
 
 @cl.on_stop
 async def on_stop():
@@ -187,10 +184,8 @@ async def query_openai_with_context(context, user_query):
         await cl.Message(content="No context available to answer the question.").send()
         return
 
-    # Initialize the OpenAI client
     client = AsyncOpenAI()
 
-    # Define the settings for the model
     settings = {
         "model": "gpt-4o",
         "temperature": 0.3,
@@ -199,7 +194,6 @@ async def query_openai_with_context(context, user_query):
         "presence_penalty": 0,
     }
 
-    # Create the message history
     message_history = [
         {"role": "system", "content": """
          Your job is to answer the user's query using only the provided context.
@@ -216,11 +210,9 @@ async def query_openai_with_context(context, user_query):
         {"role": "user", "content": f"Question: {user_query}"}
     ]
 
-    # Initialize a message object to handle streaming
     msg = cl.Message(content="")
     await msg.send()
 
-    # Define a task for streaming
     async def stream_response():
         stream = await client.chat.completions.create(messages=message_history, stream=True, **settings)
         async for part in stream:
@@ -237,13 +229,10 @@ async def query_openai_with_context(context, user_query):
         await send_query_actions()
         return
 
-    # Finalize the response
     final_response = msg.content
     await msg.update()
 
-    # Clear the current task from the session
     cl.user_session.set("current_task", None)
 
-    # Send the query actions for further interaction
     await send_query_actions()
     return final_response
