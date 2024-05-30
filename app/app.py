@@ -1,6 +1,7 @@
 import os
 
 import arxiv
+import inspect
 import asyncio
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
@@ -15,16 +16,21 @@ metadata_vector_store = PineconeVectorStore.from_existing_index(embedding=embedd
 chunks_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-project-chunks")
 semantic_chunker = SemanticChunker(embeddings=embedding_model, buffer_size=1, add_start_index=False)
 current_task = None
+send_query_actions_called = False
 
 async def send_query_actions():
-    if cl.user_session.get("session_active"):
-        actions = [
-            cl.Action(name="ask_followup_question", value="followup_question", description="Ask a follow-up question (Uses the previously retrieved context)", label="Ask a Follow-Up Question"),
-            cl.Action(name="ask_new_question", value="new_question", description="Ask a new question about the same paper (Retrieves new context)", label="Ask a New Question About the Same Paper"),
-            cl.Action(name="ask_about_new_paper", value="new_paper", description="Ask a new question about a new paper", label="Ask About a Different Paper"),
-            cl.Action(name="exit_session", value="exit", description="Quit the Program", label="Exit Session")
-        ]
-        await cl.Message(content="### Please Select One of the Following Options:", actions=actions).send()
+    global send_query_actions_called
+    if not send_query_actions_called:
+        send_query_actions_called = True
+        if cl.user_session.get("session_active"):
+            actions = [
+                cl.Action(name="ask_followup_question", value="followup_question", description="Ask a follow-up question (Uses the previously retrieved context)", label="Ask a Follow-Up Question"),
+                cl.Action(name="ask_new_question", value="new_question", description="Ask a new question about the same paper (Retrieves new context)", label="Ask a New Question About the Same Paper"),
+                cl.Action(name="ask_about_new_paper", value="new_paper", description="Ask a new question about a new paper", label="Ask About a Different Paper"),
+                cl.Action(name="exit_session", value="exit", description="Quit the Program", label="Exit Session")
+            ]
+            await cl.Message(content="### Please Select One of the Following Options:", actions=actions).send()
+        send_query_actions_called = False
 
 @cl.on_chat_start
 async def main():
@@ -143,7 +149,7 @@ async def do_chunks_exist_already(document_id):
     return bool(test_query)
 
 async def process_and_upload_chunks(document_id):
-    await cl.Message(content="#### Paper Not Found. Downloading, Processing, and Uploading in Progress. Please Wait; This Won't Take Long.").send()
+    await cl.Message(content="#### Paper Not Found. Downloading, Processing, and Uploading in Progress.\n #### Please Wait; This Won't Take Long.").send()
     await asyncio.sleep(2)
     paper = next(arxiv.Client().results(arxiv.Search(id_list=[str(document_id)])))
     paper.download_pdf(filename=f"{document_id}.pdf")
@@ -177,7 +183,8 @@ async def on_stop():
     if cl.user_session.get("current_task"):
         cl.user_session.get("current_task").cancel()
         cl.user_session.set("current_task", None)
-    await send_query_actions()
+    if cl.user_session.get("session_active") and not send_query_actions_called:
+        await send_query_actions()
 
 async def query_openai_with_context(context, user_query):
     if not context:
@@ -226,7 +233,8 @@ async def query_openai_with_context(context, user_query):
         await stream_task
     except asyncio.CancelledError:
         stream_task.cancel()
-        await send_query_actions()
+        if not send_query_actions_called:
+            await send_query_actions()
         return
 
     final_response = msg.content
@@ -234,5 +242,6 @@ async def query_openai_with_context(context, user_query):
 
     cl.user_session.set("current_task", None)
 
-    await send_query_actions()
+    if cl.user_session.get("session_active") and not send_query_actions_called:
+        await send_query_actions()
     return final_response
