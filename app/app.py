@@ -3,17 +3,17 @@ import os
 import arxiv
 import inspect
 import asyncio
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_experimental.text_splitter import SemanticChunker
+from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 import chainlit as cl
 from openai import AsyncOpenAI
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-embedding_model = HuggingFaceEmbeddings()
-metadata_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-metadata")
-chunks_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-project-chunks")
+embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
+metadata_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-rag-metadata")
+chunks_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-rag-chunks")
 semantic_chunker = SemanticChunker(embeddings=embedding_model, buffer_size=1, add_start_index=False)
 current_task = None
 send_query_actions_called = False
@@ -120,7 +120,7 @@ async def select_document_from_results(search_results):
 
     message_content = "### List of Retrieved Papers | Please Select the Number Corresponding to Your Desired Paper:\n"
     for i, doc in enumerate(search_results, start=1):
-        page_content = doc.page_content[:100]
+        page_content = doc.page_content
         document_id = doc.metadata['document_id']
         message_content += f"{i}: {page_content}\n"
 
@@ -161,8 +161,9 @@ async def process_and_upload_chunks(document_id):
     for page in pages:
         text = page.page_content
         chunks.extend(semantic_chunker.split_text(text))
-    chunks_vector_store.from_texts(texts=chunks, embedding=embedding_model, metadatas=[{"document_id": document_id} for _ in chunks], index_name="arxiv-project-chunks")
+    chunks_vector_store.from_texts(texts=chunks, embedding=embedding_model, metadatas=[{"document_id": document_id} for _ in chunks], index_name="arxiv-rag-chunks")
     os.remove(f"{document_id}.pdf")
+    await asyncio.sleep(2)
 
 async def process_user_query(document_id):
     res = await cl.AskUserMessage(content="### Please Enter Your Question:", timeout=3600).send()
