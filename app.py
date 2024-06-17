@@ -381,7 +381,7 @@ async def run_metadata_pipeline():
         if not df_processed.empty:
             logger.info('DataFrame is not empty. Proceeding with Pinecone upload.')
             embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
-            index_name = "openai-metadata"
+            index_name = "arxiv-rag-metadata"
             vector_store = PineconeVectorStore.from_existing_index(index_name=index_name, embedding=embeddings_model)
             await upload_to_pinecone(df_processed, vector_store)
         else:
