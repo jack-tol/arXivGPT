@@ -27,13 +27,14 @@ from aiohttp import ClientSession
 logging.basicConfig(filename='combined_log.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Function to initialize embedding model
+# Global variable to track daily task
+daily_task_scheduled = False
+
 def initialize_embeddings():
     """Initialize the OpenAI embedding model."""
     logger.info("Initializing OpenAI embeddings...")
     return OpenAIEmbeddings(model="text-embedding-3-small")
 
-# Function to initialize vector stores
 def initialize_vector_stores(embedding_model):
     """Initialize Pinecone vector stores for metadata and chunks."""
     logger.info("Initializing Pinecone vector stores...")
@@ -41,7 +42,6 @@ def initialize_vector_stores(embedding_model):
     chunks_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-rag-chunks")
     return metadata_vector_store, chunks_vector_store
 
-# Function to initialize text splitter
 def initialize_text_splitter():
     """Initialize the recursive character text splitter."""
     logger.info("Initializing text splitter...")
@@ -74,8 +74,12 @@ async def on_stop():
 @cl.on_chat_start
 async def main():
     """Main function to start the chat session."""
-    # Schedule the daily metadata task
-    asyncio.create_task(daily_metadata_task())
+    global daily_task_scheduled
+    
+    # Schedule the daily metadata task once globally
+    if not daily_task_scheduled:
+        asyncio.create_task(daily_metadata_task())
+        daily_task_scheduled = True
     
     embedding_model = initialize_embeddings()
     metadata_vector_store, chunks_vector_store = initialize_vector_stores(embedding_model)
@@ -107,7 +111,6 @@ This system is connected to the live stream of papers being uploaded to arXiv da
 When You're Ready, Follow the First Step Below.
 """
     await cl.Message(content=text_content).send()
-
     await ask_initial_query()
 
 async def ask_initial_query():
@@ -139,6 +142,7 @@ async def ask_user_question(document_id):
         await task
 
 async def select_document_from_results(search_results):
+    """Allow user to select a document from the search results."""
     if not search_results:
         await cl.Message(content="No Search Results Found").send()
         return None
@@ -197,18 +201,15 @@ async def process_and_upload_chunks(document_id):
     await asyncio.sleep(2)
 
     try:
-        # Create an async session for downloading
         async with ClientSession() as session:
             paper = await asyncio.to_thread(next, arxiv.Client().results(arxiv.Search(id_list=[str(document_id)])))
             url = paper.pdf_url
             filename = f"{document_id}.pdf"
             await download_pdf(session, document_id, url, filename)
 
-        # Load and split the PDF into pages
         loader = PyPDFLoader(filename)
         pages = await asyncio.to_thread(loader.load)
 
-        # Process and split pages into chunks
         text_splitter = user_session.get('text_splitter')
         content = []
         found_references = False
@@ -226,12 +227,10 @@ async def process_and_upload_chunks(document_id):
         full_content = ''.join(content)
         chunks = text_splitter.split_text(full_content)
 
-        # Ensure embedding model is initialized
         embedding_model = user_session.get('embedding_model')
         if not embedding_model:
             raise ValueError("Embedding model not initialized")
 
-        # Upload chunks to Pinecone asynchronously
         chunks_vector_store = user_session.get('chunks_vector_store')
         await asyncio.to_thread(
             chunks_vector_store.from_texts,
@@ -241,11 +240,8 @@ async def process_and_upload_chunks(document_id):
             index_name="arxiv-rag-chunks"
         )
 
-        # Clean up the downloaded PDF file asynchronously
         await aiofiles.os.remove(filename)
         logger.info(f"Successfully processed and uploaded chunks for document_id: {document_id}")
-
-        # Ensure the transition to asking a question happens
         await ask_user_question(document_id)
 
     except Exception as e:
@@ -269,7 +265,7 @@ async def process_user_query(document_id):
             if context:
                 break
             logger.info(f"No context found, retrying... (attempt {attempt + 1}/{attempts})")
-            await asyncio.sleep(2)  # Wait before retrying
+            await asyncio.sleep(2)
 
         logger.info(f"User query processed. Context length: {len(context)}, User Query: {user_query}")
         return context, user_query
@@ -326,10 +322,8 @@ async def query_openai_with_context(context, user_query):
         return
 
     await msg.update()
-
     await send_actions()
 
-# Action callbacks
 @cl.action_callback("ask_followup_question")
 async def handle_followup_question(action):
     """Handle follow-up question action."""
@@ -365,6 +359,7 @@ async def handle_new_paper(action):
     await ask_initial_query()
 
 async def run_metadata_pipeline():
+    """Run the daily metadata pipeline."""
     logger.info('Starting daily task.')
     current_date = get_current_est_date()
     logger.info(f'Current EST date: {current_date}')
@@ -374,9 +369,9 @@ async def run_metadata_pipeline():
         await download_metadata(from_date, until_date)
         await remove_line_breaks_and_wrap('arxiv_metadata.xml', 'arxiv_metadata_cleaned.xml')
         df = await parse_xml_to_dataframe('arxiv_metadata_cleaned.xml')
-        await aiofiles.os.remove('arxiv_metadata_cleaned.xml')  # Clean up intermediate file
-        await aiofiles.os.remove('arxiv_metadata.xml')  # Clean up the original downloaded XML file
-        df_processed = await process_arxiv_metadata(df)
+        await aiofiles.os.remove('arxiv_metadata_cleaned.xml')
+        await aiofiles.os.remove('arxiv_metadata.xml')
+        df_processed = process_arxiv_metadata(df)
 
         if not df_processed.empty:
             logger.info('DataFrame is not empty. Proceeding with Pinecone upload.')
@@ -393,10 +388,12 @@ async def run_metadata_pipeline():
     logger.info('Daily task completed.')
 
 def get_current_est_date():
+    """Get the current date in EST."""
     est = pytz.timezone('US/Eastern')
     return datetime.now(est).strftime('%Y-%m-%d')
 
 async def download_metadata(from_date, until_date):
+    """Download metadata from arXiv for the specified date range."""
     connection = Sickle('http://export.arxiv.org/oai2')
     logger.info('Getting papers...')
     params = {'metadataPrefix': 'arXiv', 'from': from_date, 'until': until_date, 'ignore_deleted': True}
@@ -409,8 +406,11 @@ async def download_metadata(from_date, until_date):
     async with aiofiles.open('arxiv_metadata.xml', 'a+', encoding="utf-8") as f:
         while True:
             try:
-                record = await asyncio.to_thread(next, data).raw
-                await f.write(record)
+                record = await asyncio.to_thread(lambda: next(data, None))
+                if record is None:
+                    logger.info(f'Metadata For The Specified Period, {from_date} - {until_date} Downloaded.')
+                    return
+                await f.write(record.raw)
                 await f.write('\n')
                 errors = 0
                 iters += 1
@@ -424,10 +424,6 @@ async def download_metadata(from_date, until_date):
                 logger.error(f'RequestException: {e}')
                 raise
 
-            except StopIteration:
-                logger.info(f'Metadata For The Specified Period, {from_date} - {until_date} Downloaded.')
-                break
-
             except Exception as e:
                 errors += 1
                 logger.error(f'Unexpected error: {e}')
@@ -436,6 +432,7 @@ async def download_metadata(from_date, until_date):
                     raise
 
 async def handle_http_error(e):
+    """Handle HTTP errors during metadata download."""
     if e.response.status_code == 503:
         retry_after = e.response.headers.get('Retry-After', 30)
         logger.warning(f"HTTPError 503: Server busy. Retrying after {retry_after} seconds.")
@@ -445,19 +442,20 @@ async def handle_http_error(e):
         raise e
 
 async def remove_line_breaks_and_wrap(input_file: str, output_file: str):
+    """Remove line breaks and wrap the content in the XML file."""
     logger.info(f'Removing line breaks and wrapping content in {input_file}.')
     async with aiofiles.open(input_file, 'r', encoding='utf-8') as infile, aiofiles.open(output_file, 'w', encoding='utf-8') as outfile:
         await outfile.write("<records>")
-        
         async for line in infile:
             cleaned_line = line.replace('\n', '').replace('\r', '')
             await outfile.write(cleaned_line)
-        
         await outfile.write("</records>")
     logger.info(f'Content wrapped and saved to {output_file}.')
 
 async def parse_xml_to_dataframe(input_file: str):
+    """Parse the XML file to a pandas DataFrame."""
     logger.info(f'Parsing XML file {input_file} to DataFrame.')
+
     def extract_records(file_path):
         context = ET.iterparse(file_path, events=('end',))
         for event, elem in context:
@@ -488,6 +486,7 @@ async def parse_xml_to_dataframe(input_file: str):
     return df
 
 def process_arxiv_metadata(df: pd.DataFrame):
+    """Process arXiv metadata DataFrame."""
     logging.info('Processing DataFrame metadata.')
     
     df.rename(columns={
@@ -526,6 +525,7 @@ def process_arxiv_metadata(df: pd.DataFrame):
     return df
 
 async def upload_to_pinecone(df, vector_store):
+    """Upload processed data to Pinecone vector store."""
     logger.info('Uploading data to Pinecone vector store.')
     texts = df['title_by_authors'].tolist()
     metadatas = df[['document_id']].to_dict(orient='records')
@@ -536,7 +536,7 @@ async def daily_metadata_task():
     """Run the daily metadata pipeline at 11 PM EST."""
     est = pytz.timezone('US/Eastern')
     now = datetime.now(est)
-    target_time = datetime.now(est).replace(hour=23, minute=00, second=0, microsecond=0)
+    target_time = datetime.now(est).replace(hour=23, minute=0, second=0, microsecond=0)
     
     if now > target_time:
         target_time += timedelta(days=1)
