@@ -1,5 +1,3 @@
-# metadata_pipeline.py
-
 import os
 import aiofiles
 import aiofiles.os
