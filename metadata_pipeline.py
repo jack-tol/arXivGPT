@@ -146,6 +146,7 @@ async def parse_xml_to_dataframe(input_file: str):
 
 def process_arxiv_metadata(df: pd.DataFrame):
     """Process arXiv metadata DataFrame."""
+    
     logging.info('Processing DataFrame Metadata.')
     
     df.rename(columns={
@@ -153,8 +154,6 @@ def process_arxiv_metadata(df: pd.DataFrame):
         'id': 'document_id',
         'created': 'date_created'
     }, inplace=True)
-
-    df.drop_duplicates(subset='document_id', inplace=True)
     
     df.replace(to_replace=r'\s\s+', value=' ', regex=True, inplace=True)
     
@@ -174,15 +173,40 @@ def process_arxiv_metadata(df: pd.DataFrame):
     
     df.loc[:, 'authors'] = df['authors'].apply(parse_authors)
     
-    df = df[df['last_edited'] == (df['date_created'] + pd.Timedelta(days=1))]
+    def is_unique_paper(row):
+        created_date = row['date_created']
+        last_edited = row['last_edited']
+        
+        if last_edited == created_date + timedelta(days=1):
+            return True
+
+        if created_date.weekday() == 4 and last_edited == created_date + timedelta(days=3):
+            return True
+        if created_date.weekday() == 5 and last_edited == created_date + timedelta(days=2):
+            return True
+        
+        if created_date.year == last_edited.year and created_date.month == last_edited.month:
+            if created_date <= last_edited:
+                if created_date.isocalendar()[1] == last_edited.isocalendar()[1]:
+                    return True
+        
+        return False
     
-    df['title_by_authors'] = df.apply(lambda row: f"{row['title']} by {row['authors']}", axis=1)
+    df['is_unique'] = df.apply(is_unique_paper, axis=1)
     
-    df.drop(columns=['last_edited', 'date_created', 'authors', 'title'], inplace=True)
+    unique_df = df[df['is_unique']].copy()
     
-    df.sort_values(by='document_id', ascending=False, inplace=True)
+    unique_df.drop(columns=['is_unique'], inplace=True)
     
-    logging.info('DataFrame Processing Complete.')
+    unique_df.loc[:, 'title_by_authors'] = unique_df.apply(lambda row: f"{row['title']} by {row['authors']}", axis=1)
+    
+    unique_df.drop(columns=['last_edited', 'date_created', 'authors', 'title'], inplace=True)
+    
+    unique_df.sort_values(by='document_id', ascending=False, inplace=True)
+    
+    unique_df.drop_duplicates(subset='document_id', inplace=True)
+    
+    logging.info('DataFrame processing complete.')
     return df
 
 async def upload_to_pinecone(df, vector_store):
