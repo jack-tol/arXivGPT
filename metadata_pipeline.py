@@ -146,79 +146,60 @@ async def parse_xml_to_dataframe(input_file: str):
 
 def process_arxiv_metadata(df: pd.DataFrame):
     """Process arXiv metadata DataFrame."""
-    
     logging.info('Processing DataFrame Metadata.')
-    
+
+    def filter_created_dates_by_datestamp(df):
+        df['last_edited'] = pd.to_datetime(df['last_edited'])
+
+        first_date = df['last_edited'].iloc[0].date()
+
+        day_of_week = first_date.weekday()
+
+        if day_of_week == 0:  # Monday
+            date_ranges = [first_date - timedelta(days=i) for i in range(1, 5)]
+        else:
+            date_ranges = [first_date - timedelta(days=i) for i in range(1, 3)]
+
+        date_ranges_str = [date.strftime('%Y-%m-%d') for date in date_ranges]
+
+        filtered_df = df[df['date_created'].isin(date_ranges_str)]
+
+        return filtered_df
+
     df.rename(columns={
         'datestamp': 'last_edited',
         'id': 'document_id',
         'created': 'date_created'
     }, inplace=True)
-    
+
+    df = filter_created_dates_by_datestamp(df)
+
+    df = df.drop_duplicates(subset='document_id').copy()
+
     df.replace(to_replace=r'\s\s+', value=' ', regex=True, inplace=True)
-    
-    df['document_id'] = df['document_id'].astype(str)
+
+    df.loc[:, 'document_id'] = df['document_id'].astype(str)
+
     df = df[df['document_id'].str.match(r'^\d')]
-    
-    df.loc[:, 'last_edited'] = pd.to_datetime(df['last_edited'])
-    df.loc[:, 'date_created'] = pd.to_datetime(df['date_created'])
+
     df.loc[:, 'authors'] = df['authors'].astype(str)
     df.loc[:, 'title'] = df['title'].astype(str)
-    
+
     def parse_authors(authors_str):
-        try:
-            authors_list = ast.literal_eval(authors_str)
-            authors_list = authors_list[:5]
-            formatted_authors = [f"{author['forenames']} {author['keyname']}" for author in authors_list]
-            return ', '.join(formatted_authors)
-        except (ValueError, SyntaxError):
-            logging.warning(f"Error parsing authors string: {authors_str}")
-            return ""
-    
+        authors_list = ast.literal_eval(authors_str)
+        authors_list = authors_list[:5]
+        formatted_authors = [f"{author['forenames']} {author['keyname']}" for author in authors_list]
+        return ', '.join(formatted_authors)
+
     df.loc[:, 'authors'] = df['authors'].apply(parse_authors)
-    
-    def is_unique_paper(row):
-        created_date = row['date_created']
-        last_edited = row['last_edited']
-        
-        if last_edited <= created_date:
-            return False
-        
-        days_diff = (last_edited - created_date).days
-        
-        if days_diff == 1:
-            return True
-        
-        if created_date.weekday() == 4 and days_diff <= 3:
-            return True
-        if created_date.weekday() == 5 and days_diff <= 2:
-            return True
-        if created_date.weekday() == 6 and days_diff <= 1:
-            return True
-        
-        if days_diff <= 5:
-            created_week = created_date.isocalendar()[1]
-            edited_week = last_edited.isocalendar()[1]
-            if created_week == edited_week or (edited_week - created_week) == 1:
-                return True
-        
-        return False
-    
-    df['is_unique'] = df.apply(is_unique_paper, axis=1)
-    
-    df = df[df['is_unique']].copy()
-    
-    df.drop(columns=['is_unique'], inplace=True)
-    
-    df.loc[:, 'title_by_authors'] = df.apply(lambda row: f"{row['title']} by {row['authors']}", axis=1)
-    
+
+    df['title_by_authors'] = df.apply(lambda row: f"{row['title']} by {row['authors']}", axis=1)
+
     df.drop(columns=['last_edited', 'date_created', 'authors', 'title'], inplace=True)
-    
+
     df.sort_values(by='document_id', ascending=False, inplace=True)
-    
-    df.drop_duplicates(subset='document_id', inplace=True)
-    
-    logging.info('DataFrame processing complete.')
+
+    logging.info('DataFrame Processing Complete.')
     return df
 
 async def upload_to_pinecone(df, vector_store):
