@@ -166,10 +166,14 @@ def process_arxiv_metadata(df: pd.DataFrame):
     df.loc[:, 'title'] = df['title'].astype(str)
     
     def parse_authors(authors_str):
-        authors_list = ast.literal_eval(authors_str)
-        authors_list = authors_list[:5]
-        formatted_authors = [f"{author['forenames']} {author['keyname']}" for author in authors_list]
-        return ', '.join(formatted_authors)
+        try:
+            authors_list = ast.literal_eval(authors_str)
+            authors_list = authors_list[:5]
+            formatted_authors = [f"{author['forenames']} {author['keyname']}" for author in authors_list]
+            return ', '.join(formatted_authors)
+        except (ValueError, SyntaxError):
+            logging.warning(f"Error parsing authors string: {authors_str}")
+            return ""
     
     df.loc[:, 'authors'] = df['authors'].apply(parse_authors)
     
@@ -177,34 +181,42 @@ def process_arxiv_metadata(df: pd.DataFrame):
         created_date = row['date_created']
         last_edited = row['last_edited']
         
-        if last_edited == created_date + timedelta(days=1):
-            return True
-
-        if created_date.weekday() == 4 and last_edited == created_date + timedelta(days=3):
-            return True
-        if created_date.weekday() == 5 and last_edited == created_date + timedelta(days=2):
+        if last_edited <= created_date:
+            return False
+        
+        days_diff = (last_edited - created_date).days
+        
+        if days_diff == 1:
             return True
         
-        if created_date.year == last_edited.year and created_date.month == last_edited.month:
-            if created_date <= last_edited:
-                if created_date.isocalendar()[1] == last_edited.isocalendar()[1]:
-                    return True
+        if created_date.weekday() == 4 and days_diff <= 3:  # Friday
+            return True
+        if created_date.weekday() == 5 and days_diff <= 2:  # Saturday
+            return True
+        if created_date.weekday() == 6 and days_diff <= 1:  # Sunday
+            return True
+        
+        if days_diff <= 5:
+            created_week = created_date.isocalendar()[1]
+            edited_week = last_edited.isocalendar()[1]
+            if created_week == edited_week or (edited_week - created_week) == 1:
+                return True
         
         return False
     
     df['is_unique'] = df.apply(is_unique_paper, axis=1)
     
-    unique_df = df[df['is_unique']].copy()
+    df = df[df['is_unique']].copy()
     
-    unique_df.drop(columns=['is_unique'], inplace=True)
+    df.drop(columns=['is_unique'], inplace=True)
     
-    unique_df.loc[:, 'title_by_authors'] = unique_df.apply(lambda row: f"{row['title']} by {row['authors']}", axis=1)
+    df.loc[:, 'title_by_authors'] = df.apply(lambda row: f"{row['title']} by {row['authors']}", axis=1)
     
-    unique_df.drop(columns=['last_edited', 'date_created', 'authors', 'title'], inplace=True)
+    df.drop(columns=['last_edited', 'date_created', 'authors', 'title'], inplace=True)
     
-    unique_df.sort_values(by='document_id', ascending=False, inplace=True)
+    df.sort_values(by='document_id', ascending=False, inplace=True)
     
-    unique_df.drop_duplicates(subset='document_id', inplace=True)
+    df.drop_duplicates(subset='document_id', inplace=True)
     
     logging.info('DataFrame processing complete.')
     return df
