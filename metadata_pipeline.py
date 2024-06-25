@@ -1,4 +1,3 @@
-import os
 import aiofiles
 import aiofiles.os
 import asyncio
