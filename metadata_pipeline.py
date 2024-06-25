@@ -189,11 +189,11 @@ def process_arxiv_metadata(df: pd.DataFrame):
         if days_diff == 1:
             return True
         
-        if created_date.weekday() == 4 and days_diff <= 3:  # Friday
+        if created_date.weekday() == 4 and days_diff <= 3:
             return True
-        if created_date.weekday() == 5 and days_diff <= 2:  # Saturday
+        if created_date.weekday() == 5 and days_diff <= 2:
             return True
-        if created_date.weekday() == 6 and days_diff <= 1:  # Sunday
+        if created_date.weekday() == 6 and days_diff <= 1:
             return True
         
         if days_diff <= 5:
