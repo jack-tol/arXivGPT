@@ -154,7 +154,7 @@ def process_arxiv_metadata(df: pd.DataFrame):
 
         day_of_week = first_date.weekday()
 
-        if day_of_week == 0:  # Monday
+        if day_of_week == 0:
             date_ranges = [first_date - timedelta(days=i) for i in range(1, 5)]
         else:
             date_ranges = [first_date - timedelta(days=i) for i in range(1, 3)]
