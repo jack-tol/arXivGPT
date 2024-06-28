@@ -13,42 +13,8 @@ import ast
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 
-logging.basicConfig(filename='combined_log.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-async def run_metadata_pipeline():
-    """Run the daily metadata pipeline."""
-    logger.info('Starting daily task.')
-    current_date = get_current_est_date()
-    logger.info(f'Current EST date: {current_date}')
-    from_date = current_date
-    until_date = current_date
-    try:
-        await download_metadata(from_date, until_date)
-        await remove_line_breaks_and_wrap('arxiv_metadata.xml', 'arxiv_metadata_cleaned.xml')
-        df = await parse_xml_to_dataframe('arxiv_metadata_cleaned.xml')
-        await aiofiles.os.remove('arxiv_metadata_cleaned.xml')
-        await aiofiles.os.remove('arxiv_metadata.xml')
-        df_processed = process_arxiv_metadata(df)
-
-        if not df_processed.empty:
-            logger.info('DataFrame is Not Empty. Proceeding with Pinecone Upload.')
-            embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
-            index_name = "arxiv-rag-metadata"
-            vector_store = PineconeVectorStore.from_existing_index(index_name=index_name, embedding=embeddings_model)
-            await upload_to_pinecone(df_processed, vector_store)
-        else:
-            logger.error("DataFrame is empty. Skipping upload.")
-    except NoRecordsMatch:
-        logger.warning("Metadata is not available for today, trying tomorrow instead.")
-    except Exception as e:
-        logger.error(f"An error occurred during the daily task: {e}")
-    logger.info('Daily task completed.')
-
-def get_current_est_date():
-    """Get the current date in EST."""
-    est = pytz.timezone('US/Eastern')
-    return datetime.now(est).strftime('%Y-%m-%d')
 
 async def download_metadata(from_date, until_date):
     """Download metadata from arXiv for the specified date range."""
@@ -66,14 +32,14 @@ async def download_metadata(from_date, until_date):
             try:
                 record = await asyncio.to_thread(lambda: next(data, None))
                 if record is None:
-                    logger.info(f'Metadata For The Specified Period, {from_date} - {until_date} Downloaded.')
+                    logger.info(f'Metadata for the specified period, {from_date} - {until_date} downloaded.')
                     return
                 await f.write(record.raw)
                 await f.write('\n')
                 errors = 0
                 iters += 1
                 if iters % 1000 == 0:
-                    logger.info(f'{iters} Processing Attempts Made Successfully.')
+                    logger.info(f'{iters} processing attempts made successfully.')
 
             except HTTPError as e:
                 await handle_http_error(e)
@@ -93,7 +59,7 @@ async def handle_http_error(e):
     """Handle HTTP errors during metadata download."""
     if e.response.status_code == 503:
         retry_after = e.response.headers.get('Retry-After', 30)
-        logger.warning(f"HTTPError 503: Server Busy. Retrying After {retry_after} Seconds.")
+        logger.warning(f"HTTPError 503: Server busy. Retrying after {retry_after} seconds.")
         await asyncio.sleep(int(retry_after))
     else:
         logger.error(f'HTTPError: Status code {e.response.status_code}')
@@ -112,8 +78,6 @@ async def remove_line_breaks_and_wrap(input_file: str, output_file: str):
 
 async def parse_xml_to_dataframe(input_file: str):
     """Parse the XML file to a pandas DataFrame."""
-    logger.info(f'Parsing XML file {input_file} to DataFrame.')
-
     def extract_records(file_path):
         context = ET.iterparse(file_path, events=('end',))
         for event, elem in context:
@@ -123,8 +87,6 @@ async def parse_xml_to_dataframe(input_file: str):
                 arxiv = metadata.find('arxiv:arXiv', namespaces) if metadata is not None else None
                 
                 record_data = {
-                    'datestamp': header.find('oai:datestamp', namespaces).text if header.find('oai:datestamp', namespaces) is not None else '',
-                    'created': arxiv.find('arxiv:created', namespaces).text if arxiv is not None and arxiv.find('arxiv:created', namespaces) is not None else '',
                     'id': arxiv.find('arxiv:id', namespaces).text if arxiv is not None and arxiv.find('arxiv:id', namespaces) is not None else '',
                     'authors': [{"keyname": author.find('arxiv:keyname', namespaces).text if author.find('arxiv:keyname', namespaces) is not None else '', "forenames": author.find('arxiv:forenames', namespaces).text if author.find('arxiv:forenames', namespaces) is not None else ''} for author in arxiv.findall('arxiv:authors/arxiv:author', namespaces)] if arxiv is not None else [],
                     'title': arxiv.find('arxiv:title', namespaces).text if arxiv is not None and arxiv.find('arxiv:title', namespaces) is not None else ''
@@ -137,52 +99,22 @@ async def parse_xml_to_dataframe(input_file: str):
         'arxiv': 'http://arxiv.org/OAI/arXiv/'
     }
     
-    records = await asyncio.to_thread(lambda: list(extract_records(input_file)))
+    records = list(extract_records(input_file))
     
     df = pd.DataFrame(records)
-    logger.info(f'Parsed XML to DataFrame with {len(df)} records.')
+    df.rename(columns={'id': 'document_id'}, inplace=True)
+
     return df
 
-def process_arxiv_metadata(df: pd.DataFrame):
-    """Process arXiv metadata DataFrame."""
-    logging.info('Processing DataFrame Metadata.')
+async def process_arxiv_metadata(unique_document_ids_df, metadata_df):
+    """Process and clean the metadata DataFrame."""
+    metadata_df = metadata_df[~metadata_df['document_id'].isin(unique_document_ids_df['document_id'])].copy()
 
-    def filter_created_dates_by_datestamp(df):
-        df['last_edited'] = pd.to_datetime(df['last_edited'])
-
-        first_date = df['last_edited'].iloc[0].date()
-
-        day_of_week = first_date.weekday()
-
-        if day_of_week == 0:
-            date_ranges = [first_date - timedelta(days=i) for i in range(1, 5)]
-        else:
-            date_ranges = [first_date - timedelta(days=i) for i in range(1, 3)]
-
-        date_ranges_str = [date.strftime('%Y-%m-%d') for date in date_ranges]
-
-        filtered_df = df[df['date_created'].isin(date_ranges_str)]
-
-        return filtered_df
-
-    df.rename(columns={
-        'datestamp': 'last_edited',
-        'id': 'document_id',
-        'created': 'date_created'
-    }, inplace=True)
-
-    df = filter_created_dates_by_datestamp(df)
-
-    df = df.drop_duplicates(subset='document_id').copy()
-
-    df.replace(to_replace=r'\s\s+', value=' ', regex=True, inplace=True)
-
-    df.loc[:, 'document_id'] = df['document_id'].astype(str)
-
-    df = df[df['document_id'].str.match(r'^\d')]
-
-    df.loc[:, 'authors'] = df['authors'].astype(str)
-    df.loc[:, 'title'] = df['title'].astype(str)
+    metadata_df.replace(to_replace=r'\s\s+', value=' ', regex=True, inplace=True)
+    metadata_df.loc[:, 'document_id'] = metadata_df['document_id'].astype(str)
+    metadata_df = metadata_df[metadata_df['document_id'].str.match(r'^\d')]
+    metadata_df.loc[:, 'authors'] = metadata_df['authors'].astype(str)
+    metadata_df.loc[:, 'title'] = metadata_df['title'].astype(str)
 
     def parse_authors(authors_str):
         authors_list = ast.literal_eval(authors_str)
@@ -190,28 +122,56 @@ def process_arxiv_metadata(df: pd.DataFrame):
         formatted_authors = [f"{author['forenames']} {author['keyname']}" for author in authors_list]
         return ', '.join(formatted_authors)
 
-    df.loc[:, 'authors'] = df['authors'].apply(parse_authors)
+    metadata_df.loc[:, 'authors'] = metadata_df['authors'].apply(parse_authors)
+    metadata_df['title_by_authors'] = metadata_df.apply(lambda row: f"{row['title']} by {row['authors']}", axis=1)
+    metadata_df.drop(columns=['authors', 'title'], inplace=True)
+    metadata_df.sort_values(by='document_id', ascending=False, inplace=True)
+    updated_unique_document_ids_df = pd.concat([unique_document_ids_df, metadata_df[['document_id']].astype(str)]).drop_duplicates().reset_index(drop=True)
+    updated_unique_document_ids_df.sort_values(by='document_id', ascending=False, inplace=True)
+    updated_unique_document_ids_df.to_csv('unique_document_ids.csv', index=False)
 
-    df['title_by_authors'] = df.apply(lambda row: f"{row['title']} by {row['authors']}", axis=1)
+    return metadata_df
 
-    df.drop(columns=['last_edited', 'date_created', 'authors', 'title'], inplace=True)
-
-    df.sort_values(by='document_id', ascending=False, inplace=True)
-
-    logging.info('DataFrame Processing Complete.')
-    return df
-
-async def upload_to_pinecone(df, vector_store):
+async def upload_to_pinecone(processed_df, vector_store):
     """Upload processed data to Pinecone vector store."""
-    num_papers = len(df)
-    logger.info(f'Preparing to Upload {num_papers} Research Papers to Pinecone Vector Store.')
-    
-    texts = df['title_by_authors'].tolist()
-    metadatas = df[['document_id']].to_dict(orient='records')
+    texts = processed_df['title_by_authors'].tolist()
+    metadatas = processed_df[['document_id']].to_dict(orient='records')
     await asyncio.to_thread(vector_store.add_texts, texts=texts, metadatas=metadatas)
+
+def get_current_est_date():
+    """Get the current date in EST."""
+    est = pytz.timezone('US/Eastern')
+    return datetime.now(est).strftime('%Y-%m-%d')
+
+async def run_metadata_pipeline():
+    current_date = get_current_est_date()
+    from_date = current_date
+    until_date = current_date
+
+    try:
+        await download_metadata(from_date, until_date)
+        await remove_line_breaks_and_wrap('arxiv_metadata.xml', 'arxiv_metadata_cleaned.xml')
+        metadata_df = await parse_xml_to_dataframe('arxiv_metadata_cleaned.xml')
+        unique_document_ids_df = pd.read_csv('unique_document_ids.csv', dtype={'document_id': str})
+        processed_df = await process_arxiv_metadata(unique_document_ids_df, metadata_df)
+        
+        if not processed_df.empty:
+            logger.info('DataFrame is not empty. Proceeding with Pinecone upload.')
+            embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
+            index_name = "arxiv-rag-metadata"
+            vector_store = PineconeVectorStore.from_existing_index(index_name=index_name, embedding=embeddings_model)
+            await upload_to_pinecone(processed_df, vector_store)
+        else:
+            logger.error("DataFrame is empty. Skipping upload.")
+    except NoRecordsMatch:
+        logger.warning("Metadata is not available for today, trying tomorrow instead.")
+    except Exception as e:
+        logger.error(f"An error occurred during the daily task: {e}")
+    finally:
+        await aiofiles.os.remove('arxiv_metadata.xml')
+        await aiofiles.os.remove('arxiv_metadata_cleaned.xml')
     
-    logger.info(f'Successfully Uploaded {num_papers} Research Papers to Pinecone Vector Store.')
-    logger.info('Upload to Pinecone Complete.')
+    logger.info('Daily task completed.')
 
 async def daily_metadata_task():
     """Run the daily metadata pipeline at 11 PM EST."""
