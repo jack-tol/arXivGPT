@@ -104,10 +104,14 @@ async def parse_xml_to_dataframe(input_file: str):
     df = pd.DataFrame(records)
     df.rename(columns={'id': 'document_id'}, inplace=True)
 
+    logger.info(f'Parsed XML to DataFrame with {len(df)} records.')
+
     return df
 
 async def process_arxiv_metadata(unique_document_ids_df, metadata_df):
     """Process and clean the metadata DataFrame."""
+    logging.info('Processing DataFrame Metadata.')
+
     metadata_df = metadata_df[~metadata_df['document_id'].isin(unique_document_ids_df['document_id'])].copy()
 
     metadata_df.replace(to_replace=r'\s\s+', value=' ', regex=True, inplace=True)
@@ -130,13 +134,17 @@ async def process_arxiv_metadata(unique_document_ids_df, metadata_df):
     updated_unique_document_ids_df.sort_values(by='document_id', ascending=False, inplace=True)
     updated_unique_document_ids_df.to_csv('unique_document_ids.csv', index=False)
 
+    logging.info('DataFrame Processing Complete.')
     return metadata_df
 
 async def upload_to_pinecone(processed_df, vector_store):
     """Upload processed data to Pinecone vector store."""
+    num_papers = len(processed_df)
+    logger.info(f'Preparing to Upload {num_papers} Research Papers to Pinecone Vector Store.')
     texts = processed_df['title_by_authors'].tolist()
     metadatas = processed_df[['document_id']].to_dict(orient='records')
     await asyncio.to_thread(vector_store.add_texts, texts=texts, metadatas=metadatas)
+    logger.info(f'Successfully Uploaded {num_papers} Research Papers to Pinecone Vector Store.')
 
 def get_current_est_date():
     """Get the current date in EST."""
