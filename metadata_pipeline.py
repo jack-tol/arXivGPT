@@ -1,5 +1,6 @@
 import aiofiles
 import aiofiles.os
+import aiofiles.ospath
 import asyncio
 import logging
 import pandas as pd
@@ -158,7 +159,17 @@ async def run_metadata_pipeline():
 
     try:
         await download_metadata(from_date, until_date)
+
+        if not await aiofiles.ospath.exists('arxiv_metadata.xml'):
+            logger.warning("Metadata file not created. Skipping further processing.")
+            return
+        
         await remove_line_breaks_and_wrap('arxiv_metadata.xml', 'arxiv_metadata_cleaned.xml')
+        
+        if not await aiofiles.ospath.exists('arxiv_metadata_cleaned.xml'):
+            logger.warning("Cleaned metadata file not created. Skipping further processing.")
+            return
+        
         metadata_df = await parse_xml_to_dataframe('arxiv_metadata_cleaned.xml')
         unique_document_ids_df = pd.read_csv('unique_document_ids.csv', dtype={'document_id': str})
         processed_df = await process_arxiv_metadata(unique_document_ids_df, metadata_df)
@@ -176,8 +187,10 @@ async def run_metadata_pipeline():
     except Exception as e:
         logger.error(f"An error occurred during the daily task: {e}")
     finally:
-        await aiofiles.os.remove('arxiv_metadata.xml')
-        await aiofiles.os.remove('arxiv_metadata_cleaned.xml')
+        if await aiofiles.ospath.exists('arxiv_metadata.xml'):
+            await aiofiles.os.remove('arxiv_metadata.xml')
+        if await aiofiles.ospath.exists('arxiv_metadata_cleaned.xml'):
+            await aiofiles.os.remove('arxiv_metadata_cleaned.xml')
     
     logger.info('Daily task completed.')
 
