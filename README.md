@@ -1,16 +1,16 @@
-# arXiv Research Assistant
+# arXivGPT
 
-Welcome to the GitHub repository for the **arXiv Research Assistant**, a project leveraging Retrieval-Augmented Generation (RAG) to help students, enthusiasts, and researchers understand and consume the latest research published on arXiv.
+Welcome to the GitHub repository for **arXivGPT**, a project leveraging Retrieval-Augmented Generation (RAG) to help students, enthusiasts, and researchers understand and consume the latest research published on arXiv.
 
 ## About
 
-The arXiv Research Assistant provides detailed explanations of research papers, making complex concepts and methodologies more accessible. This tool utilizes language models and RAG to enhance the learning experience.
+arXivGPT provides detailed explanations of research papers, making complex concepts and methodologies more accessible. This tool utilizes language models and RAG to enhance the learning experience.
 
 A three-part series covers the development and rationale behind the functions and code of this project. If you're interested in a deeper dive, I recommend reading it.
 
 ## Project Links
 
-- [Hosted Web Application](https://jacktol.net/arxiv-research-assistant)
+- [Hosted Web Application](https://arxivgpt.net)
 - [Blog and Additional Resources](https://jacktol.net)
 
 ## How does it work?
