@@ -11,8 +11,8 @@ A three-part series covers the development and rationale behind the functions an
 ## Project Links
 
 - [Hosted Web Application](https://arxivgpt.net)
-- [Blog and Additional Resources](https://jacktol.net)
 - [ConversationAI](https://conversationai.io)
+- [Blog and Additional Resources](https://jacktol.net)
 
 ## How does it work?
 
