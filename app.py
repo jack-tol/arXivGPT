@@ -48,7 +48,7 @@ async def send_actions():
         cl.Action(name="ask_new_question", value="new_question", description="Retrieves New Context", label="Ask a New Question About the Same Paper"),
         cl.Action(name="ask_about_new_paper", value="new_paper", description="Ask About A Different Paper", label="Ask About a Different Paper")
     ]
-    await cl.Message(content="### Please Select One of the Following Options:", actions=actions).send()
+    await cl.Message(content="### Please Select One of the Following Options", actions=actions).send()
 
 @cl.on_stop
 async def on_stop():
@@ -79,32 +79,38 @@ async def main():
     user_session.set('text_splitter', text_splitter)
     user_session.set('current_document_id', None)
 
-    text_content = """## Welcome to the arXiv Research Assistant
+    # Start with the initial query
+    await ask_initial_query(initial=True)
 
-This system is designed to support students, researchers, and enthusiasts by providing real-time access to, and understanding of, the extensive research continually uploaded to arXiv.
+async def ask_initial_query(initial=False):
+    """Prompt the user to enter the title of the research paper."""
+    if initial:
+        # Combined welcome message and query prompt
+        text_content = """## Welcome to arXivGPT
 
-With daily updates, it seamlessly integrates new papers, ensuring users always have the latest information at their fingertips.
+arXivGPT helps students, researchers, and enthusiasts by providing real-time access to the latest research uploaded to arXiv.
+
+With daily updates, it ensures users always have the most recent information.
 
 ### Instructions
-1. **Enter the Title**: Start by entering the title of the research paper you wish to learn more about.
-2. **Select a Paper**: Select a paper from the retrieved list by entering its corresponding number.
-3. **Database Check**: The system will verify if the paper is already in the database.
-   - If it exists, you'll be prompted to enter your question.
-   - If it does not exist, the system will download the paper to the database and then prompt you to enter your question.
+1. **Enter the Title**: Begin by entering the title of the research paper.
+2. **Select a Paper**: Choose a paper from the list by entering its number.
+3. **Database Check**: The system checks if the paper is in the database.
+   - If yes, you'll be prompted to enter your question.
+   - If not, the paper is downloaded, then you'll be prompted to ask your question.
 4. **Read the Answer**: After receiving the answer, you can:
    - Ask a follow-up question.
    - Ask a new question about the same paper.
-   - Ask a new question about a different paper.
+   - Ask about a different paper.
 
 ### Get Started
-When you're ready, follow the first step below.
-"""
-    await cl.Message(content=text_content).send()
-    await ask_initial_query()
+Enter the title of the research paper you wish to learn more about.
 
-async def ask_initial_query():
-    """Prompt the user to enter the title of the research paper."""
-    res = await cl.AskUserMessage(content="### Please Enter the Title of the Research Paper You Wish to Learn More About:", timeout=3600).send()
+"""
+        res = await cl.AskUserMessage(content=text_content, timeout=3600).send()
+    else:
+        res = await cl.AskUserMessage(content="### Please Enter the Title of the Research Paper You Wish to Learn More About", timeout=3600).send()
+
     if res:
         initial_query = res['output']
         metadata_vector_store = user_session.get('metadata_vector_store')
@@ -136,7 +142,7 @@ async def select_document_from_results(search_results):
         await cl.Message(content="No Search Results Found").send()
         return None
 
-    message_content = "### Please Enter the Number Corresponding to Your Desired Paper:\n"
+    message_content = "### Please Enter the Number Corresponding to Your Desired Paper\n"
     message_content += "| No. | Paper Title | Doc. ID |\n"
     message_content += "|-----|-------------|---------|\n"
 
@@ -240,7 +246,7 @@ async def process_and_upload_chunks(document_id):
 
 async def process_user_query(document_id):
     """Process the user's query about the document."""
-    res = await cl.AskUserMessage(content="### Please Enter Your Question:", timeout=3600).send()
+    res = await cl.AskUserMessage(content="### Please Enter Your Question", timeout=3600).send()
     if res:
         user_query = res['output']
         context = []
@@ -283,8 +289,14 @@ async def query_openai_with_context(context, user_query):
          subheadings, ordered and unordered lists, and regular text formatting such as bolding of text and italics.
          Sometimes the equations retrieved from the context will be formatted improperly and in an incompatible format
          for correct LaTeX rendering. Therefore, if you ever need to provide equations, make sure they are
-         formatted properly using LaTeX, wrapping the equation in single dollar signs ($) for inline equations
-         or double dollar signs ($$) for bigger, more visual equations. Keep your answer grounded in the facts
+         formatted properly using LaTeX. For in-line equations make sure you wrap the equation in single dollar signs $
+         and for bigger, more visual equations make sure to wrap the equation in double dollar signs. Remember, some of the
+         LaTeX may be given to you in an incorrect or weird format.
+         
+         For example, "( \kappa )" wouldn't render inline, however "$( \kappa )$" would render. Similarly "( \ell_{\text{margin}} )"
+         wouldn't render either while "$( \ell_{\text{margin}} )$" would render. Make sure you render equations correctly.
+         
+         Don't change the content of the equation, but just fix up what you have been given. Keep your answer grounded in the facts
          of the provided context. If the context does not contain the facts needed to answer the user's query, return:
          "I do not have enough information available to accurately answer the question."
          """},
@@ -345,7 +357,7 @@ async def handle_new_question(action):
 async def handle_new_paper(action):
     """Handle new paper action."""
     logger.info("New paper button clicked.")
-    await ask_initial_query()
+    await ask_initial_query(initial=False)
 
 if __name__ == "__main__":
     asyncio.run(main())
