@@ -93,13 +93,13 @@ font_family = "Inter, sans-serif"
 
 # Override default MUI light theme. (Check theme.ts)
 [UI.theme.light]
-background = "fafafa"
-paper = "ffffff"
+background = "#FAFAFA"
+paper = "#FFFFFF"
 
 [UI.theme.light.primary]
-main = "#f20000"
-dark = "#000000"
-light = "#FFFFFF"
+main = "#FF0000"
+dark = "#980039"
+light = "#FFCCCC"
 
 [UI.theme.light.text]
 primary = "#000000"
