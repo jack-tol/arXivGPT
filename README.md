@@ -2,7 +2,7 @@
 
 Welcome to the GitHub repository for **arXivGPT**, a project leveraging Retrieval-Augmented Generation (RAG) to help students, enthusiasts, and researchers understand and consume the latest research published on arXiv.
 
-arXivGPT is a ConversationAI Product. For more information. visit https://conversationai.io.
+arXivGPT is a ConversationAI Product. For more information, visit https://conversationai.io.
 
 ## About
 
