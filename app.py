@@ -1,363 +1,301 @@
-import arxiv
-import aiofiles
-import aiofiles.os
-import asyncio
+import os
 import logging
+import asyncio
+from datetime import datetime, timedelta
+
+import aiofiles
+import aiohttp
+import pytz
+import arxiv
 import chainlit as cl
-from openai import AsyncOpenAI
-from chainlit.context import context
 from chainlit.user_session import user_session
-from aiohttp import ClientSession
-from metadata_pipeline import daily_metadata_task
-from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from metadata_pipeline import main_pipeline
+from openai import AsyncOpenAI
+from langchain_community.document_loaders import PyPDFLoader
+from dotenv import load_dotenv
 
-logging.basicConfig(filename='combined_log.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+load_dotenv(override=True)
 
-daily_task_scheduled = False
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def initialize_embeddings():
-    """Initialize the OpenAI embedding model."""
-    logger.info("Initializing OpenAI embeddings...")
-    return OpenAIEmbeddings(model="text-embedding-3-small")
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def initialize_vector_stores(embedding_model):
-    """Initialize Pinecone vector stores for metadata and chunks."""
-    logger.info("Initializing Pinecone vector stores...")
-    metadata_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-rag-metadata")
-    chunks_vector_store = PineconeVectorStore.from_existing_index(embedding=embedding_model, index_name="arxiv-rag-chunks")
-    return metadata_vector_store, chunks_vector_store
+embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
+metadata_vector_store = PineconeVectorStore.from_existing_index(
+    embedding=embedding_model, index_name="arxiv-rag-metadata"
+)
+chunks_vector_store = PineconeVectorStore.from_existing_index(
+    embedding=embedding_model, index_name="arxiv-rag-chunks"
+)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=0, separators=["\n\n", "\n", " "])
 
-def initialize_text_splitter():
-    """Initialize the recursive character text splitter."""
-    logger.info("Initializing text splitter...")
-    return RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=50,
-        length_function=len,
-        is_separator_regex=False
+task_scheduled = False
+
+pipeline_lock = asyncio.Lock()
+
+async def schedule_daily_metadata_task():
+    async def run_main_pipeline_daily():
+        est = pytz.timezone("US/Eastern")
+        while True:
+            try:
+                async with pipeline_lock:
+                    now = datetime.now(est)
+                    
+                    target_time = now.replace(hour=23, minute=0, second=0, microsecond=0)
+                    if now >= target_time:
+                        target_time += timedelta(days=1)
+                    
+                    delay_seconds = (target_time - now).total_seconds()
+                    logging.info(f"Next metadata update at {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+                                 f"(in {delay_seconds/3600:.1f} hours)")
+                    
+                    await asyncio.sleep(delay_seconds)
+                    logging.info("Starting daily metadata update...")
+                    
+                    try:
+                        await main_pipeline()
+                    except Exception as e:
+                        logging.error(f"Pipeline failed: {e}")
+                        await asyncio.sleep(3600)
+
+            except Exception as e:
+                logging.error(f"Scheduler error: {e}")
+                await asyncio.sleep(3600)
+
+    global task_scheduled
+    if not task_scheduled:
+        task_scheduled = True
+        asyncio.create_task(run_main_pipeline_daily())
+        logging.info("Daily metadata scheduler initialized")
+
+async def does_paper_exist(document_id):
+    try:
+        filter = {"document_id": {"$eq": document_id}}
+        exists = len(chunks_vector_store.similarity_search(query="Chunks Existence Check", k=1, filter=filter)) > 0
+        return exists
+    except Exception as e:
+        logging.error(f"Error checking if paper exists: {e}")
+        return False
+
+async def process_selected_paper_with_feedback(document_id):
+    try:
+        async with aiohttp.ClientSession() as session:
+            paper = await asyncio.to_thread(
+                next, arxiv.Client().results(arxiv.Search(id_list=[str(document_id)]))
+            )
+            if not paper.pdf_url:
+                raise Exception(f"No PDF URL found for document ID: {document_id}")
+
+            filename = f"{document_id}.pdf"
+            async with session.get(paper.pdf_url) as response:
+                if response.status == 200:
+                    async with aiofiles.open(filename, "wb") as f:
+                        await f.write(await response.read())
+                else:
+                    raise Exception(f"Failed to download PDF. Status: {response.status}")
+
+            loader = PyPDFLoader(filename)
+            pages = await asyncio.to_thread(loader.load)
+
+            content, found_references = [], False
+            for page in pages:
+                if found_references:
+                    break
+                page_text = page.page_content
+                if "references" in page_text.lower():
+                    content.append(page_text.split("References")[0])
+                    found_references = True
+                else:
+                    content.append(page_text)
+
+            chunks = text_splitter.split_text("".join(content))
+            if not chunks:
+                raise Exception("No valid chunks generated from the text.")
+
+            await asyncio.to_thread(
+                chunks_vector_store.from_texts,
+                texts=chunks,
+                embedding=embedding_model,
+                metadatas=[{"document_id": document_id} for _ in chunks],
+                index_name="arxiv-rag-chunks",
+            )
+
+            if os.path.exists(filename):
+                os.remove(filename)
+
+            return True
+    except Exception as e:
+        logging.error(f"Error processing paper ID {document_id}: {e}")
+        return False
+
+async def retrieve_context_with_retries(document_id):
+    for attempt in range(10):
+        try:
+            filter = {"document_id": {"$eq": document_id}}
+            retrieved_chunks = chunks_vector_store.similarity_search(
+                query="Retrieve all content", k=100, filter=filter
+            )
+            if retrieved_chunks:
+                return "\n".join(chunk.page_content for chunk in retrieved_chunks)
+            await asyncio.sleep(5)
+        except Exception as e:
+            logging.error(f"#### Error retrieving context for document ID {document_id} on attempt {attempt + 1}: {e}")
+    raise Exception(f"#### Failed to retrieve chunks for document ID {document_id} after 5 attempts.")
+
+async def select_document_from_results(search_results):
+    if not search_results:
+        return None
+
+    paper_list_message = (
+        "### Select a Paper by Entering Its Number\n\n"
+        "| No. | Paper Title | Doc. ID |\n"
+        "|-----|-------------|---------|\n"
+        + "".join(
+            f"| {i + 1} | {doc.page_content} | {doc.metadata['document_id']} |\n"
+            for i, doc in enumerate(search_results)
+        )
     )
+    res = await cl.AskUserMessage(content=paper_list_message, timeout=3600).send()
 
-async def send_actions():
-    """Send action options to the user."""
-    actions = [
-        cl.Action(name="ask_followup_question", value="followup_question", description="Uses The Previously Retrieved Context", label="Ask a Follow-Up Question"),
-        cl.Action(name="ask_new_question", value="new_question", description="Retrieves New Context", label="Ask a New Question About the Same Paper"),
-        cl.Action(name="ask_about_new_paper", value="new_paper", description="Ask About A Different Paper", label="Ask About a Different Paper")
-    ]
-    await cl.Message(content="### Please Select One of the Following Options", actions=actions).send()
+    while True:
+        if not res or not res.get("output"):
+            res = await cl.AskUserMessage(content="❌ Invalid selection. Please enter a valid number.", timeout=3600).send()
+            continue
 
-@cl.on_stop
-async def on_stop():
-    """Handle session stop event to clean up tasks."""
-    streaming_task = user_session.get('streaming_task')
-    if streaming_task:
-        streaming_task.cancel()
-        await send_actions()
-    user_session.set('streaming_task', None)
-    logger.info("Session stopped and streaming task cleaned up.")
+        try:
+            choice = int(res["output"]) - 1
+            if 0 <= choice < len(search_results):
+                return search_results[choice].metadata["document_id"]
+            else:
+                res = await cl.AskUserMessage(content="❌ Number out of range. Please enter a valid number from the list.", timeout=3600).send()
+        except ValueError:
+            res = await cl.AskUserMessage(content="❌ Invalid input. Please enter a valid number.", timeout=3600).send()
+
+@cl.on_message
+async def on_message(message: cl.Message):
+    if not user_session.get("in_chat_mode", False):
+        await cl.Message(content="#### No context available. Please select a paper first.").send()
+        return
+
+    message_history = user_session.get("message_history", [])
+    message_history.append({"role": "user", "content": message.content})
+
+    try:
+        msg = cl.Message(content="")
+        await msg.send()
+
+        stream = await client.chat.completions.create(
+            messages=message_history, stream=True, model="gpt-4o", temperature=0.7
+        )
+
+        async for part in stream:
+            if token := part.choices[0].delta.content or "":
+                await msg.stream_token(token)
+
+        await msg.update()
+        message_history.append({"role": "assistant", "content": msg.content})
+        user_session.set("message_history", message_history)
+
+    except Exception as e:
+        await cl.Message(content=f"#### An error occurred while processing your query: {e}").send()
 
 @cl.on_chat_start
 async def main():
-    """Main function to start the chat session."""
-    global daily_task_scheduled
-    
-    if not daily_task_scheduled:
-        asyncio.create_task(daily_metadata_task())
-        daily_task_scheduled = True
-    
-    embedding_model = initialize_embeddings()
-    metadata_vector_store, chunks_vector_store = initialize_vector_stores(embedding_model)
-    text_splitter = initialize_text_splitter()
+    system_message = {
+        "role": "system",
+        "content": """Your job is to answer the users' queries using only the provided context.
+Be detailed and long-winded. Format your responses in markdown formatting, making good use of headings,
+subheadings, ordered and unordered lists, and regular text formatting such as **bold** and *italic* text.
+Provide equations properly formatted in LaTeX for correct rendering.
 
-    user_session.set('embedding_model', embedding_model)
-    user_session.set('metadata_vector_store', metadata_vector_store)
-    user_session.set('chunks_vector_store', chunks_vector_store)
-    user_session.set('text_splitter', text_splitter)
-    user_session.set('current_document_id', None)
+Use Markdown-compatible LaTeX formatting:
+- For inline equations, wrap them in single dollar signs `$` (e.g., `$(x^2 + y^2 = z^2)$`).
+- For larger, display-style equations, wrap them in double dollar signs `$$` (e.g., `$$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$`).
+This style is commonly used in Markdown-based tools like Obsidian, Jupyter Notebooks, and Notion.
 
-    # Start with the initial query
-    await ask_initial_query(initial=True)
-
-async def ask_initial_query(initial=False):
-    """Prompt the user to enter the title of the research paper."""
-    if initial:
-        # Combined welcome message and query prompt
-        text_content = """## Welcome to arXivGPT
-
-arXivGPT helps students, researchers, and enthusiasts by providing real-time access to the latest research uploaded to arXiv.
-
-With daily updates, it ensures users always have the most recent information.
-
-### Instructions
-1. **Enter the Title**: Begin by entering the title of the research paper.
-2. **Select a Paper**: Choose a paper from the list by entering its number.
-3. **Database Check**: The system checks if the paper is in the database.
-   - If yes, you'll be prompted to enter your question.
-   - If not, the paper is downloaded, then you'll be prompted to ask your question.
-4. **Read the Answer**: After receiving the answer, you can:
-   - Ask a follow-up question.
-   - Ask a new question about the same paper.
-   - Ask about a different paper.
-
-### Get Started
-Enter the title of the research paper you wish to learn more about.
-
-"""
-        res = await cl.AskUserMessage(content=text_content, timeout=3600).send()
-    else:
-        res = await cl.AskUserMessage(content="### Please Enter the Title of the Research Paper You Wish to Learn More About", timeout=3600).send()
-
-    if res:
-        initial_query = res['output']
-        metadata_vector_store = user_session.get('metadata_vector_store')
-        logger.info(f"Searching for metadata with query: {initial_query}")
-        search_results = metadata_vector_store.similarity_search(query=initial_query, k=5)
-        logger.info(f"Metadata search results: {search_results}")
-        selected_doc_id = await select_document_from_results(search_results)
-        if selected_doc_id:
-            logger.info(f"Document selected with ID: {selected_doc_id}")
-            user_session.set('current_document_id', selected_doc_id)
-            chunks_exist = await do_chunks_exist_already(selected_doc_id)
-            if not chunks_exist:
-                await process_and_upload_chunks(selected_doc_id)
-            else:
-                await ask_user_question(selected_doc_id)
-
-async def ask_user_question(document_id):
-    """Prompt the user to enter a question about the selected document."""
-    logger.info(f"Asking user question for document_id: {document_id}")
-    context, user_query = await process_user_query(document_id)
-    if context and user_query:
-        task = asyncio.create_task(query_openai_with_context(context, user_query))
-        user_session.set('streaming_task', task)
-        await task
-
-async def select_document_from_results(search_results):
-    """Allow user to select a document from the search results."""
-    if not search_results:
-        await cl.Message(content="No Search Results Found").send()
-        return None
-
-    message_content = "### Please Enter the Number Corresponding to Your Desired Paper\n"
-    message_content += "| No. | Paper Title | Doc. ID |\n"
-    message_content += "|-----|-------------|---------|\n"
-
-    for i, doc in enumerate(search_results, start=1):
-        page_content = doc.page_content
-        document_id = doc.metadata['document_id']
-        message_content += f"| {i} | {page_content} | {document_id} |\n"
-
-    await cl.Message(content=message_content).send()
-
-    while True:
-        res = await cl.AskUserMessage(content="", timeout=3600).send()
-        if res:
-            try:
-                user_choice = int(res['output']) - 1
-                if 0 <= user_choice < len(search_results):
-                    selected_doc_id = search_results[user_choice].metadata['document_id']
-                    selected_paper_title = search_results[user_choice].page_content
-                    await cl.Message(content=f"\n**You selected:** {selected_paper_title}").send()
-                    return selected_doc_id
-                else:
-                    await cl.Message(content="\nInvalid Selection. Please enter a valid number from the list.").send()
-            except ValueError:
-                await cl.Message(content="\nInvalid input. Please enter a number.").send()
-        else:
-            await cl.Message(content="\nNo selection made. Please enter a valid number from the list.").send()
-
-async def do_chunks_exist_already(document_id):
-    """Check if chunks for the document already exist."""
-    chunks_vector_store = user_session.get('chunks_vector_store')
-    filter = {"document_id": {"$eq": document_id}}
-    test_query = chunks_vector_store.similarity_search(query="Chunks Existence Check", k=1, filter=filter)
-    logger.info(f"Chunks existence check result for document_id {document_id}: {test_query}")
-    return bool(test_query)
-
-async def download_pdf(session, document_id, url, filename):
-    """Download the PDF file asynchronously."""
-    logger.info(f"Downloading PDF for document_id: {document_id} from URL: {url}")
-    async with session.get(url) as response:
-        if response.status == 200:
-            async with aiofiles.open(filename, mode='wb') as f:
-                await f.write(await response.read())
-            logger.info(f"Successfully downloaded PDF for document_id: {document_id}")
-        else:
-            logger.error(f"Failed to download PDF for document_id: {document_id}, status code: {response.status}")
-            raise Exception(f"Failed to download PDF: {response.status}")
-
-async def process_and_upload_chunks(document_id):
-    """Download, process, and upload chunks of the document."""
-    await cl.Message(content="#### It seems that paper isn't currently in our database. Don't worry, we are currently downloading, processing, and uploading it. This will only take a few moments.").send()
-    await asyncio.sleep(2)
-
-    try:
-        async with ClientSession() as session:
-            paper = await asyncio.to_thread(next, arxiv.Client().results(arxiv.Search(id_list=[str(document_id)])))
-            url = paper.pdf_url
-            filename = f"{document_id}.pdf"
-            await download_pdf(session, document_id, url, filename)
-
-        loader = PyPDFLoader(filename)
-        pages = await asyncio.to_thread(loader.load)
-
-        text_splitter = user_session.get('text_splitter')
-        content = []
-        found_references = False
-
-        for page in pages:
-            if found_references:
-                break
-            page_text = page.page_content
-            if "references" in page_text.lower():
-                content.append(page_text.split("References")[0])
-                found_references = True
-            else:
-                content.append(page_text)
-
-        full_content = ''.join(content)
-        chunks = text_splitter.split_text(full_content)
-
-        embedding_model = user_session.get('embedding_model')
-        if not embedding_model:
-            raise ValueError("Embedding model not initialized")
-
-        chunks_vector_store = user_session.get('chunks_vector_store')
-        await asyncio.to_thread(
-            chunks_vector_store.from_texts,
-            texts=chunks,
-            embedding=embedding_model,
-            metadatas=[{"document_id": document_id} for _ in chunks],
-            index_name="arxiv-rag-chunks"
-        )
-
-        await aiofiles.os.remove(filename)
-        logger.info(f"Successfully processed and uploaded chunks for document_id: {document_id}")
-        await ask_user_question(document_id)
-
-    except Exception as e:
-        logger.error(f"Error processing and uploading chunks for document_id {document_id}: {e}")
-        await cl.Message(content="#### An error occurred during processing. Please try again.").send()
-        return
-
-async def process_user_query(document_id):
-    """Process the user's query about the document."""
-    res = await cl.AskUserMessage(content="### Please Enter Your Question", timeout=3600).send()
-    if res:
-        user_query = res['output']
-        context = []
-        chunks_vector_store = user_session.get('chunks_vector_store')
-        filter = {"document_id": {"$eq": document_id}}
-        attempts = 5
-        for attempt in range(attempts):
-            search_results = chunks_vector_store.similarity_search(query=user_query, k=15, filter=filter)
-            logger.info(f"Context retrieval attempt {attempt + 1}: Found {len(search_results)} results")
-            context = [doc.page_content for doc in search_results]
-            if context:
-                break
-            logger.info(f"No context found, retrying... (attempt {attempt + 1}/{attempts})")
-            await asyncio.sleep(2)
-
-        logger.info(f"User query processed. Context length: {len(context)}, User Query: {user_query}")
-        return context, user_query
-    return None, None
-
-async def query_openai_with_context(context, user_query):
-    """Query OpenAI with the context and user query."""
-    if not context:
-        await cl.Message(content="No context available to answer the question.").send()
-        return
-
-    client = AsyncOpenAI()
-
-    settings = {
-        "model": "gpt-4o",
-        "temperature": 0.3,
-        "top_p": 1,
-        "frequency_penalty": 0,
-        "presence_penalty": 0,
+For example, `$(\kappa)$` will render correctly, whereas `( \kappa )` will not. Similarly, `$(\ell_{\text{margin}})$` renders properly, while `( \ell_{\text{margin}} )` does not. Ensure all LaTeX provided in your response is properly formatted for Markdown compatibility."""
     }
 
-    message_history = [
-        {"role": "system", "content": """
-         Your job is to answer the user's query using only the provided context.
-         Be detailed and long-winded. Format your responses in markdown formatting, making good use of headings,
-         subheadings, ordered and unordered lists, and regular text formatting such as bolding of text and italics.
-         Sometimes the equations retrieved from the context will be formatted improperly and in an incompatible format
-         for correct LaTeX rendering. Therefore, if you ever need to provide equations, make sure they are
-         formatted properly using LaTeX. For in-line equations make sure you wrap the equation in single dollar signs $
-         and for bigger, more visual equations make sure to wrap the equation in double dollar signs. Remember, some of the
-         LaTeX may be given to you in an incorrect or weird format.
-         
-         For example, "( \kappa )" wouldn't render inline, however "$( \kappa )$" would render. Similarly "( \ell_{\text{margin}} )"
-         wouldn't render either while "$( \ell_{\text{margin}} )$" would render. Make sure you render equations correctly.
-         
-         Don't change the content of the equation, but just fix up what you have been given. Keep your answer grounded in the facts
-         of the provided context. If the context does not contain the facts needed to answer the user's query, return:
-         "I do not have enough information available to accurately answer the question."
-         """},
-        {"role": "user", "content": f"Context: {context}"},
-        {"role": "user", "content": f"Question: {user_query}"}
-    ]
+    user_session.set("message_history", [system_message])
+    user_session.set("in_chat_mode", False)
+    user_session.set("processing_paper", False)
 
-    msg = cl.Message(content="")
-    await msg.send()
+    await schedule_daily_metadata_task()
 
-    async def stream_response():
-        stream = await client.chat.completions.create(messages=message_history, stream=True, **settings)
-        async for part in stream:
-            if token := part.choices[0].delta.content:
-                await msg.stream_token(token)
+    while True:
+        if user_session.get("processing_paper", False):
+            await cl.Message(content="### Processing in progress. Please wait...").send()
+            continue
 
-    streaming_task = asyncio.create_task(stream_response())
-    user_session.set('streaming_task', streaming_task)
+        raw_input = await cl.AskUserMessage(
+            content="""## Welcome to arXivGPT
 
-    try:
-        await streaming_task
-    except asyncio.CancelledError:
-        streaming_task.cancel()
-        return
+arXivGPT assists students and researchers by providing real-time access to the latest research uploaded to arXiv.
 
-    await msg.update()
-    await send_actions()
+Updated daily, it ensures that users always have the most up-to-date information at their fingertips.
 
-@cl.action_callback("ask_followup_question")
-async def handle_followup_question(action):
-    """Handle follow-up question action."""
-    logger.info("Follow-up question button clicked.")
-    current_document_id = user_session.get('current_document_id')
-    if current_document_id:
-        context, user_query = await process_user_query(current_document_id)
-        if context and user_query:
-            logger.info(f"Processing follow-up question for document_id: {current_document_id}")
-            task = asyncio.create_task(query_openai_with_context(context, user_query))
-            user_session.set('streaming_task', task)
-            await task
-        else:
-            logger.warning("Context or user query not found for follow-up question.")
-    else:
-        logger.warning("No current document ID found for follow-up question.")
+### Instructions
+1. **Enter the Title**: Start by entering the title of the research paper you're interested in.
+2. **Select a Paper**: Choose a paper from the list by entering its number.
+3. **Database Check**: The system will check if the paper is in the database.
+   - If it's already in the database, you can immediately start asking questions.
+   - If it's not, the paper will be downloaded, and then you can begin asking your questions.
 
-@cl.action_callback("ask_new_question")
-async def handle_new_question(action):
-    """Handle new question action."""
-    logger.info("New question about the same paper button clicked.")
-    current_document_id = user_session.get('current_document_id')
-    if current_document_id:
-        logger.info(f"Asking new question for document_id: {current_document_id}")
-        await ask_user_question(current_document_id)
-    else:
-        logger.warning("No current document ID found for new question.")
+4. **Enjoy the Conversation**: Feel free to ask about any aspect of the paper. If you wish to explore a different paper, simply click the "New Chat" button in the top right corner to start again.
 
-@cl.action_callback("ask_about_new_paper")
-async def handle_new_paper(action):
-    """Handle new paper action."""
-    logger.info("New paper button clicked.")
-    await ask_initial_query(initial=False)
+### Get Started
+Enter the title of the research paper you want to learn more about.
+""",
+            timeout=3600,
+        ).send()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        if not raw_input or not raw_input.get("output"):
+            await cl.Message(content="Invalid input. Please try again.").send()
+            continue
+
+        paper_input = str(raw_input.get("output"))
+
+        user_session.set("processing_paper", True)
+
+        try:
+            search_results = metadata_vector_store.similarity_search(query=paper_input, k=5)
+
+            if not search_results:
+                await cl.Message(content="#### No results found. Please try a different title.").send()
+                user_session.set("processing_paper", False)
+                continue
+
+            selected_doc_id = await select_document_from_results(search_results)
+
+            if not selected_doc_id:
+                user_session.set("processing_paper", False)
+                continue
+
+            status_msg = cl.Message(content="#### Processing your paper. Please wait...")
+            await status_msg.send()
+
+            if not await does_paper_exist(selected_doc_id):
+                if not await process_selected_paper_with_feedback(selected_doc_id):
+                    status_msg.content = "### An error occurred while processing the paper."
+                    await status_msg.update()
+                    user_session.set("processing_paper", False)
+                    continue
+
+            combined_content = await retrieve_context_with_retries(selected_doc_id)
+            user_session.set("message_history", [
+                system_message,
+                {"role": "system", "content": f"Context: {combined_content}"}
+            ])
+            user_session.set("in_chat_mode", True)
+
+            status_msg.content = "#### Paper details retrieved. You can now begin asking questions!"
+            await status_msg.update()
+
+            break
+        except Exception as e:
+            await cl.Message(content=f"An error occurred: {e}").send()
+        finally:
+            user_session.set("processing_paper", False)

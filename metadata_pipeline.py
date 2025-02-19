@@ -1,214 +1,184 @@
-import aiofiles
-import aiofiles.os
-import aiofiles.ospath
-import asyncio
+import re
 import logging
 import pandas as pd
+import csv
+import asyncio
 from sickle import Sickle
-from sickle.oaiexceptions import NoRecordsMatch
-from requests.exceptions import HTTPError, RequestException
-from datetime import datetime, timedelta
+from pinecone import Pinecone, ServerlessSpec
+from openai import OpenAI
+import os
+from datetime import datetime
 import pytz
-import xml.etree.ElementTree as ET
-import ast
-from langchain_openai import OpenAIEmbeddings
-from langchain_pinecone import PineconeVectorStore
+from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+load_dotenv(override=True)
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-async def download_metadata(from_date, until_date):
-    """Download metadata from arXiv for the specified date range."""
-    connection = Sickle('http://export.arxiv.org/oai2')
-    logger.info('Getting papers...')
-    params = {'metadataPrefix': 'arXiv', 'from': from_date, 'until': until_date, 'ignore_deleted': True}
-    data = connection.ListRecords(**params)
-    logger.info('Papers retrieved.')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    iters = 0
-    errors = 0
 
-    async with aiofiles.open('arxiv_metadata.xml', 'a+', encoding="utf-8") as f:
-        while True:
-            try:
-                record = await asyncio.to_thread(lambda: next(data, None))
-                if record is None:
-                    logger.info(f'Metadata for the specified period, {from_date} - {until_date} downloaded.')
-                    return
-                await f.write(record.raw)
-                await f.write('\n')
-                errors = 0
-                iters += 1
-                if iters % 1000 == 0:
-                    logger.info(f'{iters} processing attempts made successfully.')
+class DataDownloader:
+    def __init__(self, base_url):
+        self.sickle = Sickle(base_url)
 
-            except HTTPError as e:
-                await handle_http_error(e)
+    async def download_records(self, from_date, until_date):
+        loop = asyncio.get_event_loop()
+        params = {'metadataPrefix': 'arXiv', 'from': from_date, 'until': until_date}
 
-            except RequestException as e:
-                logger.error(f'RequestException: {e}')
-                raise
+        try:
+            records = await loop.run_in_executor(
+                None, 
+                lambda: list(self.sickle.ListRecords(**params))
+            )
+            raw_data = "".join(str(record.raw) for record in records)
+            logging.info(f"Downloaded {len(records)} records from {from_date} to {until_date}.")
+            return raw_data
+        except Exception as e:
+            logging.error(f"Failed to download records: {e}")
+            raise
 
-            except Exception as e:
-                errors += 1
-                logger.error(f'Unexpected error: {e}')
-                if errors > 5:
-                    logger.critical('Too many consecutive errors, stopping the harvester.')
-                    raise
 
-async def handle_http_error(e):
-    """Handle HTTP errors during metadata download."""
-    if e.response.status_code == 503:
-        retry_after = e.response.headers.get('Retry-After', 30)
-        logger.warning(f"HTTPError 503: Server busy. Retrying after {retry_after} seconds.")
-        await asyncio.sleep(int(retry_after))
-    else:
-        logger.error(f'HTTPError: Status code {e.response.status_code}')
-        raise e
+class RecordParser:
+    def __init__(self):
+        self.record_pattern = re.compile(r'<record.*?>(.*?)</record>', re.DOTALL)
+        self.id_pattern = re.compile(r'<id>(.*?)</id>')
+        self.title_pattern = re.compile(r'<title>(.*?)</title>', re.DOTALL)
+        self.author_pattern = re.compile(r'<author>(.*?)</author>', re.DOTALL)
+        self.keyname_pattern = re.compile(r'<keyname>(.*?)</keyname>')
+        self.forenames_pattern = re.compile(r'<forenames>(.*?)</forenames>')
+        self.parsed_data = []
+        self.failed_records = []
 
-async def remove_line_breaks_and_wrap(input_file: str, output_file: str):
-    """Remove line breaks and wrap the content in the XML file."""
-    logger.info(f'Removing line breaks and wrapping content in {input_file}.')
-    async with aiofiles.open(input_file, 'r', encoding='utf-8') as infile, aiofiles.open(output_file, 'w', encoding='utf-8') as outfile:
-        await outfile.write("<records>")
-        async for line in infile:
-            cleaned_line = line.replace('\n', '').replace('\r', '')
-            await outfile.write(cleaned_line)
-        await outfile.write("</records>")
-    logger.info(f'Content wrapped and saved to {output_file}.')
+    def extract_id_title_authors(self, record):
+        id_match = self.id_pattern.search(record)
+        title_match = self.title_pattern.search(record)
+        record_id = id_match.group(1) if id_match else None
+        title = title_match.group(1).replace('\n', ' ').strip() if title_match else None
+        title = self.clean_text(title) if title else None
+        authors = self.extract_authors(record)
+        return record_id, title, authors
 
-async def parse_xml_to_dataframe(input_file: str):
-    """Parse the XML file to a pandas DataFrame."""
-    def extract_records(file_path):
-        context = ET.iterparse(file_path, events=('end',))
-        for event, elem in context:
-            if elem.tag == '{http://www.openarchives.org/OAI/2.0/}record':
-                header = elem.find('oai:header', namespaces)
-                metadata = elem.find('oai:metadata', namespaces)
-                arxiv = metadata.find('arxiv:arXiv', namespaces) if metadata is not None else None
-                
-                record_data = {
-                    'id': arxiv.find('arxiv:id', namespaces).text if arxiv is not None and arxiv.find('arxiv:id', namespaces) is not None else '',
-                    'authors': [{"keyname": author.find('arxiv:keyname', namespaces).text if author.find('arxiv:keyname', namespaces) is not None else '', "forenames": author.find('arxiv:forenames', namespaces).text if author.find('arxiv:forenames', namespaces) is not None else ''} for author in arxiv.findall('arxiv:authors/arxiv:author', namespaces)] if arxiv is not None else [],
-                    'title': arxiv.find('arxiv:title', namespaces).text if arxiv is not None and arxiv.find('arxiv:title', namespaces) is not None else ''
-                }
-                yield record_data
-                elem.clear()
-    
-    namespaces = {
-        'oai': 'http://www.openarchives.org/OAI/2.0/',
-        'arxiv': 'http://arxiv.org/OAI/arXiv/'
-    }
-    
-    records = list(extract_records(input_file))
-    
-    df = pd.DataFrame(records)
-    df.rename(columns={'id': 'document_id'}, inplace=True)
+    def extract_authors(self, record):
+        authors = []
+        for author in self.author_pattern.findall(record):
+            keyname = self.keyname_pattern.search(author)
+            forenames = self.forenames_pattern.search(author)
+            if keyname and forenames:
+                authors.append(f"{forenames.group(1).strip()} {keyname.group(1).strip()}")
+            elif keyname:
+                authors.append(keyname.group(1).strip())
+            elif forenames:
+                authors.append(forenames.group(1).strip())
+        return ", ".join(filter(None, authors))
 
-    logger.info(f'Parsed XML to DataFrame with {len(df)} records.')
+    @staticmethod
+    def clean_text(text):
+        return re.sub(r'\s+', ' ', text).strip()
 
-    return df
+    def parse_records(self, raw_data):
+        for record in self.record_pattern.findall(raw_data):
+            record_id, title, authors = self.extract_id_title_authors(record)
+            if record_id and title and authors:
+                self.parsed_data.append({'id': record_id, 'title': title, 'authors': authors})
+            else:
+                self.failed_records.append(record)
 
-async def process_arxiv_metadata(unique_document_ids_df, metadata_df):
-    """Process and clean the metadata DataFrame."""
-    logging.info('Processing DataFrame Metadata.')
+    def display_failed_records(self):
+        if self.failed_records:
+            logging.warning("Some records failed to parse.")
+        else:
+            logging.info("All records parsed successfully.")
 
-    metadata_df = metadata_df[~metadata_df['document_id'].isin(unique_document_ids_df['document_id'])].copy()
 
-    metadata_df.replace(to_replace=r'\s\s+', value=' ', regex=True, inplace=True)
-    metadata_df.loc[:, 'document_id'] = metadata_df['document_id'].astype(str)
-    metadata_df = metadata_df[metadata_df['document_id'].str.match(r'^\d')]
-    metadata_df.loc[:, 'authors'] = metadata_df['authors'].astype(str)
-    metadata_df.loc[:, 'title'] = metadata_df['title'].astype(str)
+class DataProcessor:
+    @staticmethod
+    def clean_and_transform(parsed_data):
+        df = pd.DataFrame(parsed_data)
+        df = df[df['id'].str.match(r'^\d')].copy()
+        df = df[~df['title'].str.contains(r'\\"', regex=True, na=False)]
+        df = df[~df['authors'].str.contains(r'\\"', regex=True, na=False)]
+        df['authors'] = df['authors'].apply(lambda x: ', '.join(x.split(', ')[:5]))
+        df.rename(columns={'id': 'document_id'}, inplace=True)
+        df.drop_duplicates(subset='document_id', inplace=True)
+        df['title_by_authors'] = df['title'] + " by " + df['authors']
+        return df[['document_id', 'title_by_authors']]
 
-    def parse_authors(authors_str):
-        authors_list = ast.literal_eval(authors_str)
-        authors_list = authors_list[:5]
-        formatted_authors = [f"{author['forenames']} {author['keyname']}" for author in authors_list]
-        return ', '.join(formatted_authors)
+    @staticmethod
+    def filter_existing(df, filename='unique_document_ids.csv'):
+        try:
+            existing_records = pd.read_csv(filename, dtype={'document_id': str})
+            existing_records['document_id'] = existing_records['document_id'].str.strip()
+            df['document_id'] = df['document_id'].astype(str).str.strip()
+            df_filtered = df[~df['document_id'].isin(existing_records['document_id'])]
+            updated_records = pd.concat([existing_records, df_filtered[['document_id']]]).drop_duplicates(subset='document_id')
+            updated_records.sort_values(by='document_id', ascending=False).to_csv(filename, index=False, quoting=csv.QUOTE_ALL)
+            logging.info(f"Updated unique document IDs saved to {filename}.")
+        except FileNotFoundError:
+            logging.warning(f"{filename} not found. Creating new file.")
+            df[['document_id']].to_csv(filename, index=False, quoting=csv.QUOTE_ALL)
+        return df_filtered
 
-    metadata_df.loc[:, 'authors'] = metadata_df['authors'].apply(parse_authors)
-    metadata_df['title_by_authors'] = metadata_df.apply(lambda row: f"{row['title']} by {row['authors']}", axis=1)
-    metadata_df.drop(columns=['authors', 'title'], inplace=True)
-    metadata_df.sort_values(by='document_id', ascending=False, inplace=True)
-    updated_unique_document_ids_df = pd.concat([unique_document_ids_df, metadata_df[['document_id']].astype(str)]).drop_duplicates().reset_index(drop=True)
-    updated_unique_document_ids_df.sort_values(by='document_id', ascending=False, inplace=True)
-    updated_unique_document_ids_df.to_csv('unique_document_ids.csv', index=False)
 
-    logging.info('DataFrame Processing Complete.')
-    return metadata_df
+async def upload_to_pinecone(filtered_unique_records, batch_size=100):
+    pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+    index_name = "arxiv-rag-metadata"
 
-async def upload_to_pinecone(processed_df, vector_store):
-    """Upload processed data to Pinecone vector store."""
-    num_papers = len(processed_df)
-    logger.info(f'Preparing to Upload {num_papers} Research Papers to Pinecone Vector Store.')
-    texts = processed_df['title_by_authors'].tolist()
-    metadatas = processed_df[['document_id']].to_dict(orient='records')
-    await asyncio.to_thread(vector_store.add_texts, texts=texts, metadatas=metadatas)
-    logger.info(f'Successfully Uploaded {num_papers} Research Papers to Pinecone Vector Store.')
+    if index_name not in pc.list_indexes().names():
+        pc.create_index(
+            name=index_name,
+            dimension=1536,
+            metric="cosine",
+            spec=ServerlessSpec(cloud="aws", region="us-east-1")
+        )
+
+    index = pc.Index(index_name)
+
+    for i in range(0, len(filtered_unique_records), batch_size):
+        batch_df = filtered_unique_records.iloc[i:i + batch_size]
+        texts = batch_df['title_by_authors'].tolist()
+
+        response = await asyncio.to_thread(
+            client.embeddings.create,
+            input=texts,
+            model="text-embedding-3-small"
+        )
+        embeddings = [item.embedding for item in response.data]
+
+        vectors = [
+            {
+                "id": str(row['document_id']),
+                "values": embedding,
+                "metadata": {"document_id": str(row['document_id']), "text": row['title_by_authors']}
+            }
+            for row, embedding in zip(batch_df.to_dict(orient="records"), embeddings)
+        ]
+        
+        await asyncio.to_thread(index.upsert, vectors=vectors)
+
 
 def get_current_est_date():
-    """Get the current date in EST."""
-    est = pytz.timezone('US/Eastern')
-    return datetime.now(est).strftime('%Y-%m-%d')
+    return datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d')
 
-async def run_metadata_pipeline():
-    current_date = get_current_est_date()
-    from_date = current_date
-    until_date = current_date
 
+async def main_pipeline():
     try:
-        await download_metadata(from_date, until_date)
+        downloader = DataDownloader('http://export.arxiv.org/oai2')
+        raw_data = await downloader.download_records(get_current_est_date(), get_current_est_date())
 
-        if not await aiofiles.ospath.exists('arxiv_metadata.xml'):
-            logger.warning("Metadata file not created. Skipping further processing.")
-            return
-        
-        await remove_line_breaks_and_wrap('arxiv_metadata.xml', 'arxiv_metadata_cleaned.xml')
-        
-        if not await aiofiles.ospath.exists('arxiv_metadata_cleaned.xml'):
-            logger.warning("Cleaned metadata file not created. Skipping further processing.")
-            return
-        
-        metadata_df = await parse_xml_to_dataframe('arxiv_metadata_cleaned.xml')
-        unique_document_ids_df = pd.read_csv('unique_document_ids.csv', dtype={'document_id': str})
-        processed_df = await process_arxiv_metadata(unique_document_ids_df, metadata_df)
-        
-        if not processed_df.empty:
-            logger.info('DataFrame is not empty. Proceeding with Pinecone upload.')
-            embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
-            index_name = "arxiv-rag-metadata"
-            vector_store = PineconeVectorStore.from_existing_index(index_name=index_name, embedding=embeddings_model)
-            await upload_to_pinecone(processed_df, vector_store)
-        else:
-            logger.error("DataFrame is empty. Skipping upload.")
-    except NoRecordsMatch:
-        logger.warning("Metadata is not available for today, trying tomorrow instead.")
+        parser = RecordParser()
+        await asyncio.to_thread(parser.parse_records, raw_data)
+
+        processor = DataProcessor()
+        df = await asyncio.to_thread(processor.clean_and_transform, parser.parsed_data)
+        filtered_unique_records = await asyncio.to_thread(processor.filter_existing, df)
+
+        parser.display_failed_records()
+
+        if not filtered_unique_records.empty:
+            await upload_to_pinecone(filtered_unique_records)
+
+        logging.info("Main pipeline completed successfully.")
+
     except Exception as e:
-        logger.error(f"An error occurred during the daily task: {e}")
-    finally:
-        if await aiofiles.ospath.exists('arxiv_metadata.xml'):
-            await aiofiles.os.remove('arxiv_metadata.xml')
-        if await aiofiles.ospath.exists('arxiv_metadata_cleaned.xml'):
-            await aiofiles.os.remove('arxiv_metadata_cleaned.xml')
-    
-    logger.info('Daily task completed.')
-
-async def daily_metadata_task():
-    """Run the daily metadata pipeline at 11 PM EST."""
-    est = pytz.timezone('US/Eastern')
-    now = datetime.now(est)
-    target_time = datetime.now(est).replace(hour=23, minute=0, second=0, microsecond=0)
-    
-    if now > target_time:
-        target_time += timedelta(days=1)
-    
-    wait_time = (target_time - now).total_seconds()
-    await asyncio.sleep(wait_time)
-    
-    while True:
-        await run_metadata_pipeline()
-        
-        target_time += timedelta(days=1)
-        wait_time = (target_time - datetime.now(est)).total_seconds()
-        await asyncio.sleep(wait_time)
+        logging.error(f"Pipeline failed: {e}")
+        raise

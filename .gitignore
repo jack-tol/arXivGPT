@@ -2,3 +2,6 @@ __pycache__/
 fly.toml
 Procfile
 .DS_Store
+.env
+.chainlit/translations/
+unique_document_ids.csv
