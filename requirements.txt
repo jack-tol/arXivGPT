@@ -1,4 +1,7 @@
+aiofiles
+aiohttp
 arxiv
+chainlit
 langchain-community
 langchain-openai
 langchain-pinecone
@@ -10,6 +13,3 @@ pypdf
 pytz
 python-dotenv
 sickle
-aiofiles
-aiohttp
-chainlit

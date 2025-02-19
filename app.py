@@ -9,13 +9,14 @@ import pytz
 import arxiv
 import chainlit as cl
 from chainlit.user_session import user_session
+from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from metadata_pipeline import main_pipeline
-from openai import AsyncOpenAI
 from langchain_community.document_loaders import PyPDFLoader
-from dotenv import load_dotenv
+from openai import AsyncOpenAI
+
+from metadata_pipeline import main_pipeline
 
 load_dotenv(override=True)
 
