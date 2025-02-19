@@ -37,4 +37,3 @@ Once you select a paper, the system checks if chunks of that paper exist in the 
 - [arXivGPT - Deployment + Demonstration — Jack Tol](https://youtu.be/4lSm1JisKeY)
 
 For any inquiries, further information, or to provide feedback and suggestions, please reach out via email at contact@jacktol.net.
-
