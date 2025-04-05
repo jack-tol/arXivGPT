@@ -137,7 +137,7 @@ async def retrieve_context(document_id):
         try:
             filter = {"document_id": {"$eq": document_id}}
             retrieved_chunks = chunks_vector_store.similarity_search(
-                query="Retrieve all content", k=100, filter=filter
+                query="Retrieve Content", k=100, filter=filter
             )
             if retrieved_chunks:
                 return "\n".join(chunk.page_content for chunk in retrieved_chunks)
