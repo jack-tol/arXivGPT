@@ -81,7 +81,7 @@ async def does_paper_exist(document_id):
         logging.error(f"Error checking if paper exists: {e}")
         return False
 
-async def process_selected_paper_with_feedback(document_id):
+async def process_paper(document_id):
     try:
         async with aiohttp.ClientSession() as session:
             paper = await asyncio.to_thread(
@@ -132,7 +132,7 @@ async def process_selected_paper_with_feedback(document_id):
         logging.error(f"Error processing paper ID {document_id}: {e}")
         return False
 
-async def retrieve_context_with_retries(document_id):
+async def retrieve_context(document_id):
     for attempt in range(10):
         try:
             filter = {"document_id": {"$eq": document_id}}
@@ -146,7 +146,7 @@ async def retrieve_context_with_retries(document_id):
             logging.error(f"#### Error retrieving context for document ID {document_id} on attempt {attempt + 1}: {e}")
     raise Exception(f"#### Failed to retrieve chunks for document ID {document_id} after 5 attempts.")
 
-async def select_document_from_results(search_results):
+async def select_paper(search_results):
     if not search_results:
         return None
 
@@ -269,7 +269,7 @@ Enter the title of the research paper you want to learn more about.
                 user_session.set("processing_paper", False)
                 continue
 
-            selected_doc_id = await select_document_from_results(search_results)
+            selected_doc_id = await select_paper(search_results)
 
             if not selected_doc_id:
                 user_session.set("processing_paper", False)
@@ -279,13 +279,13 @@ Enter the title of the research paper you want to learn more about.
             await status_msg.send()
 
             if not await does_paper_exist(selected_doc_id):
-                if not await process_selected_paper_with_feedback(selected_doc_id):
+                if not await process_paper(selected_doc_id):
                     status_msg.content = "### An error occurred while processing the paper."
                     await status_msg.update()
                     user_session.set("processing_paper", False)
                     continue
 
-            combined_content = await retrieve_context_with_retries(selected_doc_id)
+            combined_content = await retrieve_context(selected_doc_id)
             user_session.set("message_history", [
                 system_message,
                 {"role": "system", "content": f"Context: {combined_content}"}
