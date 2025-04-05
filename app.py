@@ -245,7 +245,7 @@ Updated daily, it ensures that users always have the most up-to-date information
    - If it's already in the database, you can immediately start asking questions.
    - If it's not, the paper will be downloaded, and then you can begin asking your questions.
 
-4. **Enjoy the Conversation**: Feel free to ask about any aspect of the paper. If you wish to explore a different paper, simply click the "New Chat" button in the top right corner to start again.
+4. **Enjoy the Conversation**: Feel free to ask about any aspect of the paper. If you wish to explore a different paper, simply click the "New Chat" button in the top left corner to start again.
 
 ### Get Started
 Enter the title of the research paper you want to learn more about.

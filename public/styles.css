@@ -1,8 +1,21 @@
-a[href*='https://github.com/Chainlit/chainlit']
-{
+#theme-toggle {
+  display: none !important;
+}
+
+.watermark {
+  display: none !important;
   visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  height: 0px !important;
+  width: 0px !important;
+  overflow: hidden !important;
 }
 
 .logo {
   display: none !important;
+}
+
+#chat-input:empty::before {
+  content: 'Message arXivGPT';
 }
